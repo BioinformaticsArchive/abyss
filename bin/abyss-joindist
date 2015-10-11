@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # Join multiple ABySS distance estimate files.
 # Written by Shaun Jackman <sjackman@bcgsc.ca>.
 use strict;
@@ -66,7 +66,7 @@ Written by Shaun Jackman.
 
 =head1 REPORTING BUGS
 
-Report bugs to <abyss@bcgsc.ca>.
+Report bugs to <abyss-users@googlegroups.com>.
 
 =head1 COPYRIGHT
 

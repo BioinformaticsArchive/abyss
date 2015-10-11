@@ -4,6 +4,7 @@
 #include "config.h"
 #include "Sense.h"
 #include "Sequence.h"
+#include "Common/Hash.h"
 #include <cassert>
 #include <cstring> // for memcpy
 #include <stdint.h>
@@ -51,11 +52,36 @@ class Kmer
 	}
 
 	void reverseComplement();
+	bool isCanonical() const;
+	void canonicalize();
 
 	bool isPalindrome() const;
 	bool isPalindrome(extDirection dir) const;
 	void setLastBase(extDirection dir, uint8_t base);
-	uint8_t getLastBaseChar() const;
+
+	/** Return the first nucleotide. */
+	uint8_t front() const
+	{
+		return at(0);
+	}
+
+	/** Return the terminal nucleotide. */
+	uint8_t back() const
+	{
+		return at(s_length - 1);
+	}
+
+	/** Return the terminal nucleotide as a character. */
+	char getLastBaseChar() const
+	{
+		return codeToBase(at(s_length - 1));
+	}
+
+	/** Return the first nucleotide as a character. */
+	char getFirstBaseChar() const
+	{
+		return codeToBase(at(0));
+	}
 
 	uint8_t shift(extDirection dir, uint8_t base = 0)
 	{
@@ -122,9 +148,13 @@ static inline Kmer reverseComplement(const Kmer& seq)
 	return rc;
 }
 
-struct hashKmer
-{
-	size_t operator()(const Kmer& o) const { return o.getHashCode(); }
-};
+NAMESPACE_STD_HASH_BEGIN
+	template <> struct hash<Kmer> {
+		size_t operator()(const Kmer& kmer) const
+		{
+			return kmer.getHashCode();
+		}
+	};
+NAMESPACE_STD_HASH_END
 
 #endif

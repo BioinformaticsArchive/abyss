@@ -1,12 +1,13 @@
-#ifndef ASSEMBLYALGORITHMS_H
-#define ASSEMBLYALGORITHMS_H 1
+#ifndef ASSEMBLY_ASSEMBLYALGORITHMS_H
+#define ASSEMBLY_ASSEMBLYALGORITHMS_H 1
 
-#include "BranchGroup.h"
-#include "BranchRecord.h"
-#include "FastaWriter.h"
-#include "SequenceCollection.h"
-#include <ostream>
+#include "Assembly/BranchGroup.h"
+#include "Assembly/Options.h"
+#include "Common/Log.h"
+#include "Common/Timer.h"
 #include <vector>
+#include <string>
+#include "Common/InsOrderedMap.h"
 
 class Histogram;
 
@@ -19,88 +20,127 @@ enum SeqContiguity
 };
 
 /** De Bruijn graph assembly algorithms. */
-namespace AssemblyAlgorithms
-{
+namespace AssemblyAlgorithms {
 
-// Read a sequence file and load them into the collection
-void loadSequences(ISequenceCollection* seqCollection,
-		std::string inFile);
+extern std::vector<size_t> tempCounter;
+extern InsOrderedMap<std::string,int> tempStatMap;
+extern void addToDb(const std::string&, const int&);
 
-/** Generate the adjacency information for all the sequences in the
- * collection. This is required before any other algorithm can run.
- */
-void generateAdjacency(ISequenceCollection* seqCollection);
+static inline
+bool extendBranch(BranchRecord& branch,
+		graph_traits<SequenceCollectionHash>::vertex_descriptor& kmer,
+		SequenceCollectionHash::SymbolSet ext);
 
-Histogram coverageHistogram(const ISequenceCollection& c);
-void setCoverageParameters(const Histogram& h);
-
-/* Erosion. Remove k-mer from the ends of blunt contigs. */
-size_t erodeEnds(ISequenceCollection* seqCollection);
-size_t erode(ISequenceCollection* c,
-		const ISequenceCollection::value_type& seq);
-size_t getNumEroded();
-
-size_t removeMarked(ISequenceCollection* pSC);
-
-// Check whether a sequence can be trimmed
-SeqContiguity checkSeqContiguity(
-		const ISequenceCollection::value_type& seq,
-		extDirection& outDir, bool considerMarks = false);
-
-// process a terminated branch for trimming
-bool processTerminatedBranchTrim(
-		ISequenceCollection* seqCollection, BranchRecord& branch);
-
-bool extendBranch(BranchRecord& branch, Kmer& kmer, SeqExt ext);
-
-// Process the extensions of the current sequence for trimming
-bool processLinearExtensionForBranch(BranchRecord& branch,
-		Kmer& currSeq, ExtensionRecord extensions, int multiplicity,
+static inline bool
+processLinearExtensionForBranch(BranchRecord& branch,
+		graph_traits<SequenceCollectionHash>::vertex_descriptor& currSeq,
+		SequenceCollectionHash::SymbolSetPair extensions,
+		int multiplicity,
 		unsigned maxLength, bool addKmer = true);
 
-/** Populate the branch group with the initial extensions to this
- * sequence. */
-void initiateBranchGroup(BranchGroup& group, const Kmer& seq,
-		const SeqExt& extension);
+static inline void
+initiateBranchGroup(BranchGroup& group,
+		const graph_traits<SequenceCollectionHash>::vertex_descriptor& seq,
+		const SequenceCollectionHash::SymbolSet& extension);
 
-// process an a branch group extension
-bool processBranchGroupExtension(BranchGroup& group,
-		size_t branchIndex, const Kmer& seq,
-		ExtensionRecord extensions, int multiplicity,
-		unsigned maxLength);
+template <typename Graph>
+void removeSequenceAndExtensions(Graph* seqCollection,
+		const typename Graph::value_type& seq);
 
-void openBubbleFile(std::ofstream& out);
-void writeBubble(std::ostream& out, const BranchGroup& group,
-		unsigned id);
-void collapseJoinedBranches(
-		ISequenceCollection* seqCollection, BranchGroup& group);
+/** Return the kmer which are adjacent to this kmer. */
+template <typename V, typename SymbolSet>
+void generateSequencesFromExtension(
+		const V& currSeq,
+		extDirection dir,
+		SymbolSet extension,
+		std::vector<V>& outseqs)
+{
+	typedef typename SymbolSet::Symbol Symbol;
 
-/* Split the remaining ambiguous nodes to allow for a non-redundant
- * assembly. Remove extensions to/from ambiguous sequences to avoid
- * generating redundant/wrong contigs.
+	std::vector<V> extensions;
+	V extSeq(currSeq);
+	extSeq.shift(dir);
+
+	// Check for the existance of the 4 possible extensions
+	for (unsigned i = 0; i < SymbolSet::NUM; ++i) {
+		// Does this sequence have an extension?
+		Symbol x(i);
+		if (extension.checkBase(x)) {
+			extSeq.setLastBase(dir, x);
+			outseqs.push_back(extSeq);
+		}
+	}
+}
+
+/** Return the adjacency of this sequence.
+ * @param considerMarks when true, treat a marked vertex as having
+ * no edges
  */
-size_t markAmbiguous(ISequenceCollection* seqCollection);
-size_t splitAmbiguous(ISequenceCollection* seqCollection);
+static inline
+SeqContiguity checkSeqContiguity(
+		const SequenceCollectionHash::value_type& seq,
+		extDirection& outDir, bool considerMarks = false)
+{
+	assert(!seq.second.deleted());
+	bool child = seq.second.hasExtension(SENSE)
+		&& !(considerMarks && seq.second.marked(SENSE));
+	bool parent = seq.second.hasExtension(ANTISENSE)
+		&& !(considerMarks && seq.second.marked(ANTISENSE));
+	if(!child && !parent)
+	{
+		//this sequence is completely isolated
+		return SC_ISLAND;
+	}
+	else if(!child)
+	{
+		outDir = ANTISENSE;
+		return SC_ENDPOINT;
+	}
+	else if(!parent)
+	{
+		outDir = SENSE;
+		return SC_ENDPOINT;
+	}
+	else
+	{
+		// sequence is contiguous
+		return SC_CONTIGUOUS;
+	}
+}
 
-size_t assembleContig(ISequenceCollection* seqCollection,
-		FastaWriter* writer, BranchRecord& branch, unsigned id);
+/** Remove all marked k-mer.
+ * @return the number of removed k-mer
+ */
+template <typename Graph>
+size_t removeMarked(Graph* pSC)
+{
+	typedef typename Graph::iterator iterator;
 
-void removeSequenceAndExtensions(ISequenceCollection* seqCollection,
-		const ISequenceCollection::value_type& seq);
-void removeExtensionsToSequence(ISequenceCollection* seqCollection,
-		const ISequenceCollection::value_type& seq, extDirection dir);
+	Timer timer(__func__);
+	size_t count = 0;
+	for (iterator it = pSC->begin(); it != pSC->end(); ++it) {
+		if (it->second.deleted())
+			continue;
+		if (it->second.marked()) {
+			removeSequenceAndExtensions(pSC, *it);
+			count++;
+		}
+		pSC->pumpNetwork();
+	}
+	if (count > 0)
+		logger(1) << "Removed " << count << " marked k-mer.\n";
+	return count;
+}
 
-void generateSequencesFromExtension(const Kmer& currSeq,
-		extDirection dir, SeqExt extension,
-		std::vector<Kmer>& outseqs);
+} // namespace AssemblyAlgorithms
 
-/* Non-distributed graph algorithms. */
-
-void performTrim(SequenceCollectionHash* seqCollection);
-size_t popBubbles(SequenceCollectionHash* pSC, std::ostream& out);
-size_t assemble(SequenceCollectionHash* seqCollection,
-		FastaWriter* fileWriter = NULL);
-
-};
+#include "AdjacencyAlgorithm.h"
+#include "AssembleAlgorithm.h"
+#include "BubbleAlgorithm.h"
+#include "CoverageAlgorithm.h"
+#include "ErodeAlgorithm.h"
+#include "LoadAlgorithm.h"
+#include "SplitAlgorithm.h"
+#include "TrimAlgorithm.h"
 
 #endif

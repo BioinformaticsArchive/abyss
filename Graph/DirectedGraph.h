@@ -1,7 +1,7 @@
 #ifndef DIRECTEDGRAPH_H
 #define DIRECTEDGRAPH_H 1
 
-#include "ContigNode.h"
+#include "Common/ContigNode.h"
 #include "Graph/Properties.h"
 #include <algorithm>
 #include <cassert>
@@ -592,6 +592,13 @@ typename DirectedGraph<VP, EP>::vertices_size_type
 num_vertices(const DirectedGraph<VP, EP>& g)
 {
 	return g.num_vertices();
+}
+
+template <typename VP, typename EP>
+typename DirectedGraph<VP, EP>::vertex_descriptor
+vertex(typename DirectedGraph<VP, EP>::vertices_size_type ui, const DirectedGraph<VP, EP>& g)
+{
+	return g.vertex(ui);
 }
 
 template <typename VP, typename EP>

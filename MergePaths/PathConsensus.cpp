@@ -21,24 +21,28 @@
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <set>
-#include <string>
 #include <vector>
+#include "VectorUtil.h"
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
+using boost::tie;
 
 #define PROGRAM "PathConsensus"
+
+DB db;
 
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman and Rong She.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... FASTA ADJ PATH\n"
+"Usage: " PROGRAM " -k<kmer> -s<consensus.fa> -o<out.path> [OPTION]... FASTA ADJ PATH\n"
 "Align sequences of ambiguous paths and output a consensus\n"
 "sequence.\n"
 "\n"
@@ -56,12 +60,22 @@ static const char USAGE_MESSAGE[] =
 "  -o, --out=FILE        output contig paths to FILE\n"
 "  -s, --consensus=FILE  output consensus sequences to FILE\n"
 "  -g, --graph=FILE      output the contig adjacency graph to FILE\n"
+"      --adj             output the graph in ADJ format [default]\n"
+"      --asqg            output the graph in ASQG format\n"
+"      --dot             output the graph in GraphViz format\n"
+"      --gv              output the graph in GraphViz format\n"
+"      --gfa             output the graph in GFA format\n"
+"      --sam             output the graph in SAM format\n"
 "  -a, --branches=N      maximum number of sequences to align\n"
 "                        default: 4\n"
 "  -p, --identity=REAL   minimum identity, default: 0.9\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for database\n"
+"      --strain=NAME     specify strain NAME for database\n"
+"      --species=NAME    specify species NAME for database\n"
 "\n"
 " DIALIGN-TX options:\n"
 "  -D, --dialign-d=N     dialign debug level, default: 0\n"
@@ -72,6 +86,8 @@ static const char USAGE_MESSAGE[] =
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k; // used by ContigProperties
 	static string out;
 	static string consensusPath;
@@ -93,7 +109,8 @@ namespace opt {
 
 static const char shortopts[] = "d:k:o:s:g:a:p:vD:M:P:";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION };
 
 static const struct option longopts[] = {
 	{ "kmer",        required_argument, NULL, 'k' },
@@ -101,6 +118,12 @@ static const struct option longopts[] = {
 	{ "out",         required_argument, NULL, 'o' },
 	{ "consensus",   required_argument, NULL, 's' },
 	{ "graph",       required_argument, NULL, 'g' },
+	{ "adj",         no_argument,       &opt::format, ADJ },
+	{ "asqg",        no_argument,       &opt::format, ASQG },
+	{ "dot",         no_argument,       &opt::format, DOT },
+	{ "gv",          no_argument,       &opt::format, DOT },
+	{ "gfa",         no_argument,       &opt::format, GFA },
+	{ "sam",         no_argument,       &opt::format, SAM },
 	{ "branches",    required_argument, NULL, 'a' },
 	{ "identity",    required_argument, NULL, 'p' },
 	{ "verbose",     no_argument,       NULL, 'v' },
@@ -109,6 +132,10 @@ static const struct option longopts[] = {
 	{ "dialign-d",   required_argument, NULL, 'D' },
 	{ "dialign-m",   required_argument, NULL, 'M' },
 	{ "dialign-p",   required_argument, NULL, 'P' },
+	{ "db",          required_argument, NULL, OPT_DB },
+	{ "library",     required_argument, NULL, OPT_LIBRARY },
+	{ "strain",      required_argument, NULL, OPT_STRAIN },
+	{ "species",     required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -145,6 +172,7 @@ struct AmbPathConstraint {
 	}
 };
 
+typedef ContigGraph<DirectedGraph<ContigProperties, Distance> > Graph;
 typedef ContigPath Path;
 typedef vector<Path> ContigPaths;
 typedef map<AmbPathConstraint, ContigPath> AmbPath2Contig;
@@ -188,8 +216,6 @@ static int getDistance(const Graph& g,
 static ContigPaths readPaths(const string& inPath,
 	vector<string>& ids, vector<bool>& isAmb)
 {
-	typedef graph_traits<Graph>::vertex_descriptor V;
-
 	assert(ids.empty());
 	assert(isAmb.empty());
 	assert(g_ambpath_contig.empty());
@@ -600,9 +626,11 @@ static ContigPath alignMulti(const Graph& g,
 		return ContigPath();
 	}
 
-	string alignment;
-	unsigned matches;
-	Sequence consensus = dialign(amb_seqs, alignment, matches);
+	unsigned matches, consensusSize;
+	NWAlignment alignment;
+	tie(matches, consensusSize) = align(amb_seqs, alignment);
+	string consensus = alignment.consensus();
+
 	if (opt::verbose > 2)
 	   	cerr << alignment << consensus << '\n';
 	float identity = (float)matches / consensus.size();
@@ -703,6 +731,7 @@ static ContigPath fillGap(const Graph& g,
 	} else if (solutions.size() == 1) {
 		if (opt::verbose > 1)
 			cerr << "1 path\n" << solutions.front() << '\n';
+		consensus = solutions.front();
 		stats.numMerged++;
 	} else {
 		assert(solutions.size() > 1);
@@ -735,6 +764,10 @@ int main(int argc, char** argv)
 		commandLine = ss.str();
 	}
 
+	if (!opt::db.empty()) {
+		opt::metaVars.resize(3);
+	}
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 			shortopts, longopts, NULL)) != -1;) {
@@ -758,6 +791,14 @@ int main(int argc, char** argv)
 		case OPT_VERSION:
 			cout << VERSION_MESSAGE;
 			exit(EXIT_SUCCESS);
+		case OPT_DB:
+			arg >> opt::db; break;
+		case OPT_LIBRARY:
+			arg >> opt::metaVars[0]; break;
+		case OPT_STRAIN:
+			arg >> opt::metaVars[1]; break;
+		case OPT_SPECIES:
+			arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -827,6 +868,18 @@ int main(int argc, char** argv)
 	stats.numAmbPaths = g_ambpath_contig.size();
 	if (opt::verbose > 0)
 		cerr << "Read " << paths.size() << " paths\n";
+
+	if (!opt::db.empty()) {
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars
+		);
+		addToDb(db, "K", opt::k);
+		addToDb(db, "pathRead", paths.size());
+	}
 
 	// Start numbering new contigs from the last
 	if (!pathIDs.empty())
@@ -934,6 +987,24 @@ int main(int argc, char** argv)
 		write_graph(fout, g, PROGRAM, commandLine);
 		assert_good(fout, opt::graphPath);
 	}
+	vector<int> vals = make_vector<int>()
+		<< stats.numAmbPaths
+		<< stats.numMerged
+		<< stats.numNoSolutions
+		<< stats.numTooManySolutions
+		<< stats.tooComplex
+		<< stats.notMerged;
 
+	vector<string> keys = make_vector<string>()
+		<< "ambg_paths"
+		<< "merged"
+		<< "no_paths"
+		<< "too_many_paths"
+		<< "too_complex"
+		<< "dissimilar";
+	if (!opt::db.empty()) {
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
 	return 0;
 }

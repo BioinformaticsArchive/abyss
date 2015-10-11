@@ -35,11 +35,11 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... FASTA|OVERLAP DIST...\n"
-"Place each contig on a one-dimesional coordinate system using\n"
+"Place each contig on a one-dimensional coordinate system using\n"
 "distance estimates and output a DOT graph with coordinates.\n"
 "\n"
 " Arguments:\n"
@@ -50,7 +50,10 @@ static const char USAGE_MESSAGE[] =
 "\n"
 " Options:\n"
 "\n"
+"      --l2=REAL         set the L2 regularizer to REAL [1e-323]\n"
 "  -x, --xscale=N        set the x scale to N nt/inch [100e3]\n"
+"      --gv, --dot       output in GraphViz DOT format [default]\n"
+"      --tsv             output in TSV format\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
@@ -59,6 +62,9 @@ static const char USAGE_MESSAGE[] =
 
 namespace opt {
 	unsigned k; // used by ContigProperties
+
+	/** The L2 regularizer. */
+	double l2 = 1e-323;
 
 	/** The x scale. */
 	double xscale = 100e3; // nt/inch
@@ -72,9 +78,13 @@ namespace opt {
 
 static const char shortopts[] = "x:v";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_L2 };
 
 static const struct option longopts[] = {
+	{ "dot", no_argument, &opt::format, DOT },
+	{ "gv", no_argument, &opt::format, DOT },
+	{ "tsv", no_argument, &opt::format, TSV },
+	{ "l2", required_argument, NULL, OPT_L2 },
 	{ "xscale", required_argument, NULL, 'x' },
 	{ "verbose", no_argument, NULL, 'v' },
 	{ "help", no_argument, NULL, OPT_HELP },
@@ -116,8 +126,9 @@ static void solve(Matrix& a, Vector& b)
 {
 	int ret = cholesky_decompose(a);
 	if (ret > 0) {
-		cerr << PROGRAM ": error: "
-			"The graph has multiple connected components.\n";
+		cerr << PROGRAM ": error: The graph matrix is singular. "
+			"It may have multiple connected components. "
+			"Try increasing the L2 regularizer, for example --l2=1e-300\n";
 		exit(EXIT_FAILURE);
 	}
 	cholesky_solve(a, b, ublas::lower());
@@ -133,6 +144,9 @@ int main(int argc, char** argv)
 		switch (c) {
 		  case '?':
 			die = true;
+			break;
+		  case OPT_L2:
+			arg >> opt::l2;
 			break;
 		  case 'x':
 			arg >> opt::xscale;
@@ -169,7 +183,6 @@ int main(int argc, char** argv)
 	typedef graph_traits<Graph>::edge_iterator Eit;
 	typedef graph_traits<Graph>::vertex_descriptor V;
 	typedef graph_traits<Graph>::vertex_iterator Vit;
-	typedef edge_bundle_type<Graph>::type EP;
 
 	Graph g;
 	if (optind < argc) {
@@ -185,8 +198,22 @@ int main(int argc, char** argv)
 	Matrix a(n, n);
 	Vector b = ublas::zero_vector<double>(n);
 
-	// Set the origin.
+	// Set the origin of the layout. Pin the first contig and its reverse
+	// complement to an extreme negative and positive position, so that the two
+	// components should not overlap. The two vertices should be in separate
+	// components. If the graph has multiple components, the matrix should be
+	// regularized by adding lambda to all values on the diagonal. The
+	// components will overlap be can be separated afterward.
+	const double MAX_SCAFFOLD_SIZE = 10e6;
 	a(0, 0) = 1;
+	b[0] = -MAX_SCAFFOLD_SIZE;
+	a(1, 1) = 1;
+	b[1] = MAX_SCAFFOLD_SIZE;
+
+	// Add the L2 regularizer to the matrix.
+	if (opt::l2 > 0)
+		for (unsigned i = 0; i < n; ++i)
+			a(i, i) += opt::l2;
 
 	// Build the information matrix.
 	Eit eit, elast;
@@ -210,18 +237,54 @@ int main(int argc, char** argv)
 	// Solve the equation Ax = b for x.
 	solve(a, b);
 
+	// Determine the origin and width of the layout.
+	double min_pos = std::numeric_limits<double>::max();
+	double max_pos = -std::numeric_limits<double>::max();
+	double min_rc = std::numeric_limits<double>::max();
+	for (unsigned i = 0; i < n; ++i) {
+		if (b[i] == 0) {
+			// A disconnected vertex.
+		} else if (b[i] < 0) {
+			min_pos = min(min_pos, b[i] - g[vertex(i, g)].length);
+			max_pos = max(max_pos, b[i]);
+		} else
+			min_rc = min(min_rc, b[i] - g[vertex(i, g)].length);
+	}
+	assert(min_pos != std::numeric_limits<double>::max());
+	assert(max_pos != -std::numeric_limits<double>::max());
+	assert(min_rc != std::numeric_limits<double>::max());
+
+	// Set the origin of the positive and negative components.
+	for (unsigned i = 0; i < n; ++i) {
+		if (b[i] == 0)
+			// A disconnected vertex.
+			b[i] = NAN;
+		else if (b[i] < 0)
+			b[i] = b[i] - min_pos;
+		else
+			b[i] = b[i] - min_rc + (max_pos - min_pos);
+	}
+
 	// Output the coordinates of each contig.
-	if (opt::verbose > 1) {
+	if (opt::format == TSV) {
+		std::cout << "Name\tSize\tLeftPos\tRightPos\n";
 		Vit uit, ulast;
 		for (tie(uit, ulast) = vertices(g); uit != ulast; ++uit) {
 			V u = *uit;
 			size_t ui = get(vertex_index, g, u);
-			ssize_t x1 = (ssize_t)b[ui];
-			ssize_t x0 = x1 - g[u].length;
-			cerr << get(vertex_name, g, u)
-				<< '\t' << x0 << '\t' << x1 << '\n';
+			std::cout << get(vertex_name, g, u) << '\t' << g[u].length;
+			if (std::isnan(b[ui])) {
+				// A disconnected vertex.
+				std::cout << "\tNA\tNA\n";
+			} else {
+				ssize_t x1 = (ssize_t)round(b[ui]);
+				ssize_t x0 = x1 - g[u].length;
+				std::cout << '\t' << x0 << '\t' << x1 << '\n';
+			}
 		}
+		exit(EXIT_SUCCESS);
 	}
+	assert(opt::format == DOT);
 
 	// Sort the contigs by their right coordinate.
 	std::vector< std::pair<double, V> > sorted;
@@ -230,7 +293,8 @@ int main(int argc, char** argv)
 	for (tie(uit, ulast) = vertices(g); uit != ulast; ++uit) {
 		V u = *uit;
 		size_t ui = get(vertex_index, g, u);
-		sorted.push_back(std::make_pair(b[ui], u));
+		double x1 = isnan(b[ui]) ? 0 : b[ui];
+		sorted.push_back(std::make_pair(x1, u));
 	}
 	sort(sorted.begin(), sorted.end());
 
@@ -244,7 +308,7 @@ int main(int argc, char** argv)
 	size_t yi = 0;
 	for (size_t i = 0; i < n; ++i) {
 		V u = sorted[i].second;
-		double pos = b[get(vertex_index, g, u)];
+		double pos = sorted[i].first;
 		size_t l = g[u].length;
 
 		if (pos - l < pos0)

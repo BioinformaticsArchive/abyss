@@ -1,8 +1,9 @@
-AC_PREREQ(2.59)
-AC_INIT(ABySS, 1.3.5, abyss-users@bcgsc.ca, abyss,
+AC_PREREQ(2.62)
+AC_INIT(ABySS, 1.9.0, abyss-users@bcgsc.ca, abyss,
 		http://www.bcgsc.ca/platform/bioinfo/software/abyss)
-AM_INIT_AUTOMAKE(foreign)
-AC_CONFIG_SRCDIR([ABYSS/Abyss.cpp])
+m4_include(m4/m4_ax_pthread.m4)
+AM_INIT_AUTOMAKE(1.9.6 foreign subdir-objects)
+AC_CONFIG_SRCDIR([ABYSS/abyss.cc])
 AC_CONFIG_HEADER([config.h])
 
 # Checks for programs.
@@ -13,7 +14,10 @@ AC_PROG_CXX
 AC_PROG_INSTALL
 AC_PROG_RANLIB
 AC_CHECK_TOOL(GHC, ghc)
-AM_CONDITIONAL([HAVE_GHC], [test "$GHC"])
+AC_CHECK_TOOL(GHC_PKG, ghc-pkg)
+AM_CONDITIONAL([HAVE_GHC_MMAP], ["$GHC_PKG" list |grep -q mmap])
+AC_CHECK_PROG(PANDOC, pandoc, yes)
+AM_CONDITIONAL([HAVE_PANDOC], [test x"$PANDOC" = x"yes"])
 
 # Checks for header files.
 AC_CHECK_HEADERS([dlfcn.h fcntl.h float.h limits.h \
@@ -36,6 +40,23 @@ AC_TYPE_UINT16_T
 AC_TYPE_UINT32_T
 AC_TYPE_UINT64_T
 
+# Check for std::hash and std::tr1::hash.
+AC_LANG_PUSH([C++])
+AC_CHECK_TYPE([std::hash<int>],
+	AC_DEFINE(HAVE_STD_HASH, [1],
+		[Define if the system provides std::hash]),
+	[], [
+#ifdef __FUJITSU
+#include <string>
+#else
+#include <functional>
+#endif])
+AC_CHECK_TYPE([std::tr1::hash<int>],
+	AC_DEFINE(HAVE_STD_TR1_HASH, [1],
+		[Define if the system provides std::tr1::hash]),
+	[], [#include <tr1/functional>])
+AC_LANG_POP([C++])
+
 # Checks for library functions.
 AC_CHECK_FUNCS([dup2 gethostname getopt_long getpagesize \
 				memset strdup strerror strtoul])
@@ -57,21 +78,42 @@ AC_CHECK_DECL(HOST_NAME_MAX, [],
 AC_ARG_WITH(boost, AS_HELP_STRING([--with-boost=PATH],
 			[specify directory for the boost header files]))
 if test "$with_boost" -a -d "$with_boost"; then
-	boost_cppflags="-I$with_boost"
+	boost_cppflags="-isystem$with_boost -isystem$with_boost/include"
 fi
+
 # MPI
 AC_ARG_WITH(mpi, AS_HELP_STRING([--with-mpi=PATH],
 	[specify prefix directory for the installed MPI parallel
 	computing library]))
 if test "$with_mpi" -a -d "$with_mpi"; then
-	mpi_cppflags="-I$with_mpi/include"
-	mpi_ldflags="-L$with_mpi/lib"
+	mpi_cppflags="-isystem$with_mpi/include"
+	if test -d "$with_mpi/lib64"; then
+		mpi_ldflags="-L$with_mpi/lib64"
+	else
+		mpi_ldflags="-L$with_mpi/lib"
+	fi
 fi
 
 AC_ARG_ENABLE(mpich, AS_HELP_STRING([--enable-mpich],
 	[use MPICH (default is to use Open MPI)]))
 AC_ARG_ENABLE(lammpi, AS_HELP_STRING([--enable-lammpi],
 	[use LAM/MPI (default is to use Open MPI)]))
+
+# SQLite
+AC_ARG_WITH(sqlite, AS_HELP_STRING([--with-sqlite=PATH],
+	[specify prefix directory for the installed sqlite library]))
+if test "$with_sqlite" -a "$with_sqlite" != "no" -a -d "$with_sqlite"; then
+	sqlite_cppflags="-I$with_sqlite/include"
+	sqlite_ldflags="-L$with_sqlite/lib -lsqlite3"
+fi
+
+# SparseHash
+AC_ARG_WITH(sparsehash, AS_HELP_STRING([--with-sparsehash=PATH],
+	[specify prefix directory for the installed sparsehash library]))
+if test "$with_sparsehash" -a "$with_sparsehash" != "no" -a -d "$with_sparsehash" ; then
+	sparsehash_cppflags="-isystem$with_sparsehash/include"
+	sparsehash_ldflags="-L$with_sparsehash/lib"
+fi
 
 AC_ARG_ENABLE(fm, AS_HELP_STRING([--enable-fm],
 	[specify the width of the FM-index in bits (default is 64-bit)]),
@@ -80,26 +122,24 @@ AC_DEFINE_UNQUOTED(FMBITS, $enable_fm,
 				   [Width of bits of the FM-index in bits])
 
 AC_ARG_ENABLE(maxk, AS_HELP_STRING([--enable-maxk=N],
-	[set the maximum k-mer length (default is 64)]),
-	[], [enable_maxk=64])
+	[set the maximum k-mer length (default is 96)]),
+	[], [enable_maxk=96])
 AC_DEFINE_UNQUOTED(MAX_KMER, [$enable_maxk], [maximum k-mer length])
 
-AC_ARG_ENABLE(popcnt, AS_HELP_STRING([--disable-popcnt],
-	[do not use the popcnt instruction]))
-if test "$enable_popcnt" != no; then
-	AC_DEFINE(ENABLE_POPCNT, 1, [Define to use the popcnt instruction])
-fi
-
-AC_ARG_ENABLE(samseqqual,
-	AS_HELP_STRING([--enable-samseqqual],
-		[enable SAM sequence and quality fields]),
-	AC_DEFINE_UNQUOTED(SAM_SEQ_QUAL, 1,
-		[Define to use SAM sequence and quality fields]))
+# Find the absolute path to the source.
+my_abs_srcdir=$(cd $srcdir; pwd)
 
 # Set compiler flags.
+boost_ver=1.56.0
+boost_ver_dir=boost_1_56_0
 AC_SUBST(CPPFLAGS,
-		 "-I$srcdir $boost_cppflags $mpi_cppflags $CPPFLAGS")
-AC_SUBST(LDFLAGS, "$mpi_ldflags $LDFLAGS")
+		 "-I$my_abs_srcdir $boost_cppflags $mpi_cppflags $sqlite_cppflags $sparsehash_cppflags $CPPFLAGS -isystem$my_abs_srcdir/$boost_ver_dir")
+AC_SUBST(LDFLAGS, "$mpi_ldflags $sqlite_ldflags $sparsehash_ldflags $LDFLAGS")
+
+# Check for pthread.h / libpthread
+# (optional 'make check' dependency)
+AX_PTHREAD([have_pthread="yes"])
+AM_CONDITIONAL([HAVE_PTHREAD], [test x"$have_pthread" = x"yes"])
 
 # Check for the MPI parallel computing library.
 libs="$LIBS"
@@ -110,6 +150,7 @@ AC_DEFINE(OMPI_SKIP_MPICXX, 1,
 AC_CHECK_HEADERS([mpi.h])
 if test "$enable_mpich"; then
 	AC_CHECK_LIB([pthread], [pthread_create])
+	AC_CHECK_LIB([mpl], [MPL_env2int])
 	AC_CHECK_LIB([mpich], [MPI_Init])
 	ac_cv_lib_mpi_MPI_Init=$ac_cv_lib_mpich_MPI_Init
 elif test "$enable_lammpi"; then
@@ -118,7 +159,7 @@ elif test "$enable_lammpi"; then
 	AC_CHECK_LIB([lam], [lam_mutex_lock])
 	AC_CHECK_LIB([mpi], [MPI_Init])
 	AC_LANG_PUSH([C++])
-	AC_CHECK_LIB([lammpi++], [main]) 
+	AC_CHECK_LIB([lammpi++], [main])
 	AC_LANG_POP([C++])
 else
 	AC_CHECK_LIB([mpi], [MPI_Init])
@@ -126,9 +167,9 @@ fi
 AM_CONDITIONAL([HAVE_LIBMPI],
 	[test $ac_cv_header_mpi_h = yes -a $ac_cv_lib_mpi_MPI_Init = yes])
 AC_SUBST(MPI_LIBS, "$LIBS")
+LIBS="$libs"
 
 # Check for the math library.
-LIBS="$libs"
 AC_CHECK_LIB([m], [sqrt])
 AC_CHECK_FUNCS([pow sqrt])
 AC_CHECK_FUNC(ceilf, [], AC_DEFINE(ceilf, [ceil],
@@ -137,12 +178,25 @@ AC_CHECK_FUNC(ceilf, [], AC_DEFINE(ceilf, [ceil],
 # Check for the dynamic linking library.
 AC_CHECK_LIB([dl], [dlsym])
 
+# Check for popcnt instruction.
+AC_COMPILE_IFELSE(
+	[AC_LANG_PROGRAM([[#include <stdint.h>],
+					  [uint64_t x = 0;]],
+					 [[__asm__("popcnt %1,%0" : "=r" (x) : "r" (x));]])],
+	[AC_DEFINE([HAVE_POPCNT], 1, [Define to 1 if you have popcnt.])],
+	[AC_DEFINE([HAVE_POPCNT], 0, [Define to 0 if you do not have popcnt.])])
+
 # Check for the hash table implementation.
 AC_LANG([C++])
 AC_CHECK_HEADERS([ \
+	functional \
+	tr1/functional \
+	boost/functional/hash.hpp \
 	boost/property_map/property_map.hpp \
 	google/sparse_hash_map \
 	unordered_map tr1/unordered_map \
+	unordered_set tr1/unordered_set \
+	boost/unordered_set.hpp \
 ])
 
 # Check for Boost.
@@ -151,11 +205,23 @@ if test $ac_cv_header_boost_property_map_property_map_hpp != yes; then
 	be downloaded from here: http://www.boost.org/users/download/
 	It is not necessary to compile Boost before installing it. The
 	following commands will download and install Boost for ABySS:
-	wget http://downloads.sourceforge.net/project/boost/boost/1.50.0/boost_1_50_0.tar.bz2
-	tar jxf boost_1_50_0.tar.bz2
-	ln -s boost_1_50_0/boost boost
-	])
+	cd $my_abs_srcdir
+	wget http://downloads.sourceforge.net/project/boost/boost/$boost_ver/$boost_ver_dir.tar.bz2
+	tar jxf $boost_ver_dir.tar.bz2
+	cd -])
 fi
+
+# Check for SQLite
+libs="$LIBS"
+if test "$with_sqlite" != "no"; then
+	AC_CHECK_HEADERS([sqlite3.h])
+	AC_CHECK_LIB([sqlite3],[main])
+fi
+if (test "$ac_cv_header_sqlite3_h" = "yes" -a "$ac_cv_lib_sqlite3_main" = "yes"); then
+	AC_DEFINE(_SQL, 1, [Define to 1 if you have sqlite lib/header])
+fi
+AC_SUBST(SQLITE_LIBS, "$LIBS")
+LIBS=$libs
 
 # Check for OpenMP.
 AC_OPENMP
@@ -164,7 +230,21 @@ if test -z $OPENMP_CXXFLAGS; then
 fi
 
 # Set compiler flags.
-AC_SUBST(AM_CXXFLAGS, '-Wall -Wextra -Werror')
+
+AC_ARG_ENABLE([werror], AS_HELP_STRING([--disable-werror],
+	[do not treat compiler warnings as errors]))
+
+if test x"$enable_werror" = x"no"; then
+	AC_SUBST(AM_CXXFLAGS, '-Wall -Wextra')
+elif test x"$enable_werror" = x"yes"; then
+	AC_SUBST(AM_CXXFLAGS, '-Wall -Wextra -Werror')
+else
+	# default
+	AC_SUBST(AM_CXXFLAGS, '-Wall -Wextra')
+fi
+
+# Build abyss-paired-dbg and abyss-paired-dbg-mpi
+AM_CONDITIONAL([PAIRED_DBG], [true])
 
 AC_CONFIG_FILES([
 	Makefile
@@ -181,6 +261,7 @@ AC_CONFIG_FILES([
 	dialign/Makefile
 	kmerprint/Makefile
 	AdjList/Makefile
+	Konnector/Makefile
 	DAssembler/Makefile
 	DistanceEst/Makefile
 	Layout/Makefile
@@ -192,15 +273,31 @@ AC_CONFIG_FILES([
 	SimpleGraph/Makefile
 	MergePaths/Makefile
 	KAligner/Makefile
+	PairedDBG/Makefile
 	ParseAligns/Makefile
 	PathOverlap/Makefile
 	Consensus/Makefile
 	FilterGraph/Makefile
+	GapFiller/Makefile
+	Sealer/Makefile
+	lib/gtest-1.7.0/Makefile
+	Unittest/Makefile
+	LogKmerCount/Makefile
+	Bloom/Makefile
+	DataBase/Makefile
 ])
-AC_OUTPUT
 
-if test $ac_cv_header_google_sparse_hash_map != yes; then
-	AC_MSG_WARN([ABySS should be compiled with Google sparsehash to
+if test "$with_sparsehash" != "no" -a "$ac_cv_header_google_sparse_hash_map" != "yes"; then
+	AC_MSG_ERROR([ABySS should be compiled with Google sparsehash to
 	reduce memory usage. It may be downloaded here:
-	http://code.google.com/p/google-sparsehash])
+	https://code.google.com/p/sparsehash/
+
+	If you do not wish to use sparsehash, specify --without-sparsehash.])
 fi
+
+if test x"$have_pthread" != x"yes"; then
+	AC_MSG_WARN([Warning: Running the unit tests with 'make check' has been disabled
+	because pthread.h and/or libpthread could not be found.])
+fi
+
+AC_OUTPUT

@@ -24,10 +24,6 @@
 using namespace std;
 using namespace boost::lambda;
 using boost::tie;
-#if !__GXX_EXPERIMENTAL_CXX0X__
-using boost::cref;
-using boost::ref;
-#endif
 
 #define PROGRAM "abyss-junction"
 
@@ -35,7 +31,7 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... OVERLAP [SCAFFOLD]...\n"
@@ -192,7 +188,7 @@ int main(int argc, char** argv)
 	ScaffoldGraph scaffoldG(overlapG.num_vertices() / 2);
 	if (optind < argc) {
 		for_each(argv + optind, argv + argc,
-				bind(readGraph, _1, ref(scaffoldG)));
+				boost::lambda::bind(readGraph, _1, boost::ref(scaffoldG)));
 		// Add any missing complementary edges.
 		size_t numAdded = addComplementaryEdges(scaffoldG);
 		if (opt::verbose > 0)

@@ -5,6 +5,7 @@
 #include "ContigProperties.h"
 #include "DirectedGraph.h"
 #include "Estimate.h"
+#include "Graph/ContigGraphAlgorithms.h" // for addComplementaryEdges
 #include "GraphIO.h"
 #include "GraphUtil.h"
 #include "IOUtil.h"
@@ -24,7 +25,7 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [FILE]...\n"
@@ -37,8 +38,10 @@ static const char USAGE_MESSAGE[] =
 "      --adj             output the graph in adj format\n"
 "      --asqg            output the graph in asqg format\n"
 "      --dist            output the graph in dist format\n"
-"      --dot             output the graph in dot format [default]\n"
+"      --dot             output the graph in GraphViz format [default]\n"
+"      --gv              output the graph in GraphViz format\n"
 "      --dot-meancov     same as above but give the mean coverage\n"
+"      --gfa             output the graph in GFA format\n"
 "      --sam             output the graph in SAM format\n"
 "  -e, --estimate output distance estimates\n"
 "  -v, --verbose  display verbose output\n"
@@ -54,6 +57,9 @@ namespace opt {
 	/** Output distance estimates. */
 	bool estimate;
 
+	/** Add missing complementary edges. */
+	bool addComplementaryEdges;
+
 	/** Output format */
 	int format = DOT; // used by ContigProperties
 }
@@ -67,7 +73,9 @@ static const struct option longopts[] = {
 	{ "asqg",    no_argument,       &opt::format, ASQG },
 	{ "dist",    no_argument,       &opt::format, DIST },
 	{ "dot",     no_argument,       &opt::format, DOT },
+	{ "gv",      no_argument,       &opt::format, DOT },
 	{ "dot-meancov", no_argument,   &opt::format, DOT_MEANCOV },
+	{ "gfa",     no_argument,       &opt::format, GFA },
 	{ "sam",     no_argument,       &opt::format, SAM },
 	{ "estimate", no_argument,      NULL, 'e' },
 	{ "kmer",    required_argument, NULL, 'k' },
@@ -102,6 +110,15 @@ void readGraphs(Graph& g, It first, It last, BetterEP betterEP)
 			readGraph(*it, g, betterEP);
 	} else
 		readGraph("-", g, betterEP);
+
+	if (opt::addComplementaryEdges) {
+		// Add any missing complementary edges. This feature is disabled.
+		size_t numAdded = addComplementaryEdges(g);
+		if (opt::verbose > 0) {
+			cerr << "Added " << numAdded << " complementary edges.\n";
+			printGraphStats(cerr, g);
+		}
+	}
 }
 
 int main(int argc, char** argv)

@@ -24,24 +24,25 @@
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
-#include <iterator>
 #include <limits>
-#include <sstream>
-#include <string>
 #include <vector>
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
 
 #define PROGRAM "MergeContigs"
 
+DB db;
+
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... FASTA [OVERLAP] PATH\n"
+"Usage: " PROGRAM " -k<kmer> -o<out.fa> [OPTION]... FASTA [OVERLAP] PATH\n"
 "Merge paths of contigs to create larger contigs.\n"
 "\n"
 " Arguments:\n"
@@ -63,11 +64,18 @@ static const char USAGE_MESSAGE[] =
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for database\n"
+"      --strain=NAME     specify strain NAME for database\n"
+"      --species=NAME    specify species NAME for database\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k; // used by ContigProperties
+	unsigned pathCount; // num of initial paths
 
 	/** Output FASTA path. */
 	static string out = "-";
@@ -90,7 +98,8 @@ namespace opt {
 
 static const char shortopts[] = "g:k:o:v";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION };
 
 static const struct option longopts[] = {
 	{ "adj", no_argument, &opt::format, ADJ },
@@ -105,6 +114,10 @@ static const struct option longopts[] = {
 	{ "verbose",     no_argument,       NULL, 'v' },
 	{ "help",        no_argument,       NULL, OPT_HELP },
 	{ "version",     no_argument,       NULL, OPT_VERSION },
+	{ "db",          required_argument, NULL, OPT_DB },
+	{ "library",     required_argument, NULL, OPT_LIBRARY },
+	{ "strain",      required_argument, NULL, OPT_STRAIN },
+	{ "species",     required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -186,12 +199,12 @@ static void mergeContigs(const Graph& g, const Contigs& contigs,
 	assert(d < 0);
 	unsigned overlap = -d;
 	const Sequence& s = sequence(contigs, v);
-	assert(s.length() > overlap);
+	assert(s.length() >= overlap);
 	Sequence ao;
 	Sequence bo(s, 0, overlap);
 	Sequence o;
 	do {
-		assert(seq.length() > overlap);
+		assert(seq.length() >= overlap);
 		ao = seq.substr(seq.length() - overlap);
 		o = createConsensus(ao, bo);
 		if (!o.empty()) {
@@ -310,6 +323,9 @@ static ContigPaths readPaths(const string& inPath,
 	if (opt::verbose > 0)
 		cerr << "Read " << count << " paths. "
 			"Using " << toSI(getMemoryUsage()) << "B of memory.\n";
+	if (!opt::db.empty())
+		addToDb(db, "Init_paths", count);
+	opt::pathCount = count;
 	assert(in.eof());
 	return paths;
 }
@@ -402,6 +418,9 @@ int main(int argc, char** argv)
 		commandLine = ss.str();
 	}
 
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -418,6 +437,14 @@ int main(int argc, char** argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db; break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0]; break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1]; break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -452,6 +479,17 @@ int main(int argc, char** argv)
 		exit(EXIT_FAILURE);
 	}
 
+	if (!opt::db.empty()) {
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars
+		);
+		addToDb(db, "K", opt::k);
+	}
+
 	const char* contigFile = argv[optind++];
 	string adjPath, mergedPathFile;
 	Graph g;
@@ -469,6 +507,10 @@ int main(int argc, char** argv)
 			cerr << "Read " << num_vertices(g) << " vertices. "
 				"Using " << toSI(getMemoryUsage())
 				<< "B of memory.\n";
+		if (!opt::db.empty()) {
+			addToDb(db, "Init_vertices", num_vertices(g));
+			addToDb(db, "Init_edges", num_edges(g));
+		}
 	}
 	mergedPathFile = string(argv[optind++]);
 
@@ -499,6 +541,8 @@ int main(int argc, char** argv)
 			cerr << "Read " << count << " sequences. "
 				"Using " << toSI(getMemoryUsage())
 				<< "B of memory.\n";
+		if (!opt::db.empty())
+			addToDb(db, "Init_seq", count);
 		assert(in.eof());
 		assert(!contigs.empty());
 		opt::colourSpace = isdigit(contigs[0].seq[0]);
@@ -558,6 +602,9 @@ int main(int argc, char** argv)
 						isACGT));
 	}
 
+	if (!opt::graphPath.empty())
+		outputGraph(g, pathIDs, paths, commandLine);
+
 	if (npaths == 0)
 		return 0;
 
@@ -573,9 +620,6 @@ int main(int argc, char** argv)
 			minCovUsed = min(minCovUsed, cov);
 	}
 
-	if (!opt::graphPath.empty())
-		outputGraph(g, pathIDs, paths, commandLine);
-
 	cerr << "The minimum coverage of single-end contigs is "
 		<< minCov << ".\n"
 		<< "The minimum coverage of merged contigs is "
@@ -589,5 +633,27 @@ int main(int argc, char** argv)
 		printContiguityStats(cerr, lengthHistogram, STATS_MIN_LENGTH)
 			<< '\t' << opt::out << '\n';
 	}
+#if 0
+	// assembly contiguity statistics
+	vector<int> vals = passContiguityStatsVal(lengthHistogram,200);
+	vector<string> keys = make_vector<string>()
+		<< "n"
+		<< "n200"
+		<< "nN50"
+		<< "min"
+		<< "N80"
+		<< "N50"
+		<< "N20"
+		<< "Esize"
+		<< "max"
+		<< "sum"
+		<< "nNG50"
+		<< "NG50";
+
+	if (!opt::db.empty()) {
+		for (unsigned a=0; a<vals.size(); a++)
+			addToDb(db, keys[a], vals[a]);
+	}
+#endif
 	return 0;
 }

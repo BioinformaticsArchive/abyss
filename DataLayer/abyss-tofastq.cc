@@ -2,11 +2,11 @@
  * Written by Shaun Jackman <sjackman@bcgsc.ca>.
  */
 #include "config.h"
+#include "Common/IOUtil.h"
+#include "Common/Uncompress.h"
+#include "DataLayer/FastaInterleave.h"
+#include "DataLayer/FastaReader.h"
 #include "DataLayer/Options.h"
-#include "FastaInterleave.h"
-#include "FastaReader.h"
-#include "IOUtil.h"
-#include "Uncompress.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>
@@ -22,7 +22,7 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... [FILE]...\n"

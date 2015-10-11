@@ -15,27 +15,28 @@
 #include <getopt.h>
 #include <iomanip>
 #include <iostream>
-#include <iterator> // for istream_iterator
 #include <limits> // for numeric_limits
-#include <sstream>
-#include <string>
 #include <vector>
 #if _OPENMP
 # include <omp.h>
 #endif
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
 
 #define PROGRAM "DistanceEst"
 
+DB db;
+
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Jared Simpson and Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... HIST [PAIR]\n"
+"Usage: " PROGRAM " -k<kmer> -s<seed-length> -n<npairs> [OPTION]... HIST [PAIR]\n"
 "Estimate distances between contigs using paired-end alignments.\n"
 "\n"
 " Arguments:\n"
@@ -66,6 +67,10 @@ static const char USAGE_MESSAGE[] =
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for sqlite\n"
+"      --strain=NAME     specify strain NAME for sqlite\n"
+"      --species=NAME    specify species NAME for sqlite\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
@@ -73,6 +78,8 @@ static const char USAGE_MESSAGE[] =
 enum { MLE, MEAN };
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k; // used by Estimate.h
 
 	/** Output graph format. */
@@ -102,8 +109,12 @@ namespace opt {
 static const char shortopts[] = "j:k:l:n:o:q:s:v";
 
 enum { OPT_HELP = 1, OPT_VERSION,
-	OPT_MIND, OPT_MAXD, OPT_FR, OPT_RF
+	OPT_MIND, OPT_MAXD, OPT_FR, OPT_RF,
+	OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES
 };
+//enum { OPT_HELP = 1, OPT_VERSION,
+//	OPT_MIND, OPT_MAXD, OPT_FR, OPT_RF
+//};
 
 static const struct option longopts[] = {
 	{ "dist",        no_argument,       &opt::format, DIST, },
@@ -120,10 +131,14 @@ static const struct option longopts[] = {
 	{ "out",         required_argument, NULL, 'o' },
 	{ "min-mapq",    required_argument, NULL, 'q' },
 	{ "seed-length", required_argument, NULL, 's' },
-	{ "threads",     required_argument,	NULL, 'j' },
+	{ "threads",     required_argument, NULL, 'j' },
 	{ "verbose",     no_argument,       NULL, 'v' },
 	{ "help",        no_argument,       NULL, OPT_HELP },
 	{ "version",     no_argument,       NULL, OPT_VERSION },
+	{ "db",          required_argument, NULL, OPT_DB },
+	{ "library",     required_argument, NULL, OPT_LIBRARY },
+	{ "strain",      required_argument, NULL, OPT_STRAIN },
+	{ "species",     required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -157,6 +172,13 @@ static int estimateDistanceUsingMean(
 /** Global variable to track a recommended minAlign parameter */
 unsigned g_recMA;
 
+static struct {
+	/* Fragment stats are considered only for fragments aligning
+	 * to different contigs, and where the contig is >=opt::seedLen. */
+	unsigned total_frags;
+	unsigned dup_frags;
+} stats;
+
 /** Estimate the distance between two contigs.
  * @param numPairs [out] the number of pairs that agree with the
  * expected distribution
@@ -185,10 +207,15 @@ static int estimateDistance(unsigned len0, unsigned len1,
 	}
 
 	// Remove duplicate fragments.
+	unsigned orig = fragments.size();
 	sort(fragments.begin(), fragments.end());
 	fragments.erase(unique(fragments.begin(), fragments.end()),
 			fragments.end());
 	numPairs = fragments.size();
+	assert((int)orig - (int)numPairs >= 0);
+	stats.total_frags += orig;
+	stats.dup_frags += orig - numPairs;
+
 	if (numPairs < opt::npairs)
 		return INT_MIN;
 
@@ -198,7 +225,7 @@ static int estimateDistance(unsigned len0, unsigned len1,
 	for (Fragments::const_iterator it = fragments.begin();
 			it != fragments.end(); ++it) {
 		int x = it->second - it->first;
-		if (!opt::rf && opt::method == MLE 
+		if (!opt::rf && opt::method == MLE
 				&& x <= 2 * int(ma - 1)) {
 			unsigned align = x / 2;
 			if (opt::verbose > 0)
@@ -318,33 +345,6 @@ static Histogram loadHist(const string& path)
 	return hist;
 }
 
-/** Read contig lengths from SAM headers. */
-static void readContigLengths(istream& in, vector<unsigned>& lengths)
-{
-	assert(in);
-	assert(lengths.empty());
-	assert(g_contigNames.empty());
-	for (string line; in.peek() == '@' && getline(in, line);) {
-		istringstream ss(line);
-		string type;
-		ss >> type;
-		if (type != "@SQ")
-			continue;
-
-		string s;
-		unsigned len;
-		ss >> expect(" SN:") >> s >> expect(" LN:") >> len;
-		assert(ss);
-
-		put(g_contigNames, lengths.size(), s);
-		lengths.push_back(len);
-	}
-	if (lengths.empty()) {
-		cerr << PROGRAM ": error: no @SQ records in the SAM header\n";
-		exit(EXIT_FAILURE);
-	}
-}
-
 /** Copy records from [it, last) to out and stop before alignments to
  * the next target sequence.
  * @param[in,out] it an input iterator
@@ -384,6 +384,9 @@ static void readPairs(It& it, const It& last, vector<SAMRecord>& out)
 
 int main(int argc, char** argv)
 {
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -412,6 +415,14 @@ int main(int argc, char** argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db; break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0]; break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1]; break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -460,6 +471,16 @@ int main(int argc, char** argv)
 		omp_set_num_threads(opt::threads);
 #endif
 
+	if (!opt::db.empty()) {
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars
+		);
+	}
+
 	string distanceCountFile(argv[optind++]);
 	string alignFile(argv[optind] == NULL ? "-" : argv[optind++]);
 
@@ -482,6 +503,16 @@ int main(int argc, char** argv)
 			"s=" << opt::seedLen << " "
 			"n=" << opt::npairs << "]\n";
 
+	vector<int> vals = make_vector<int>()
+		<< opt::k
+		<< opt::seedLen
+		<< opt::npairs;
+
+	vector<string> keys = make_vector<string>()
+		<< "K"
+		<< "SeedLen"
+		<< "NumPairs";
+
 	// The fragment size histogram may not be written out until after
 	// the alignments complete. Wait for the alignments to complete.
 	in.peek();
@@ -502,6 +533,14 @@ int main(int argc, char** argv)
 					? "reverse-forward (RF)" : "forward-reverse (FR)")
 			<< ".\n";
 	}
+
+	vals += make_vector<int>()
+		<< numFR
+		<< numRF;
+
+	keys += make_vector<string>()
+		<< "FR_orientation"
+		<< "RF_orientation";
 
 	// Determine the orientation of the library.
 	if (opt::rf == -1)
@@ -536,9 +575,37 @@ int main(int argc, char** argv)
 			<< opt::minDist << " and " << opt::maxDist << " bp.\n";
 	assert(opt::minDist < opt::maxDist);
 
+	vals += make_vector<int>()
+		<< opt::minDist
+		<< opt::maxDist
+		<< (int)round(h.mean())
+		<< h.median()
+		<< (int)round(h.sd())
+		<< h.size()
+		<< h.minimum()
+		<< h.maximum();
+
+	keys += make_vector<string>()
+		<< "minDist"
+		<< "maxDist"
+		<< "mean"
+		<< "median"
+		<< "sd"
+		<< "n"
+		<< "min"
+		<< "max";
+
 	// Read the contig lengths.
 	vector<unsigned> contigLens;
-	readContigLengths(in, contigLens);
+
+	vals += make_vector<int>()
+		<< readContigLengths(in, contigLens);
+
+	keys += make_vector<string>()
+		<< "CntgCounted";
+
+//	readContigLengths(in, contigLens);
+
 	g_contigNames.lock();
 
 	// Estimate the distances between contigs.
@@ -561,6 +628,31 @@ int main(int argc, char** argv)
 			break;
 		writeEstimates(out, records, contigLens, pmf);
 	}
+
+	if (opt::verbose > 0) {
+		float prop_dups = (float)100 * stats.dup_frags / stats.total_frags;
+		cerr << "Duplicate rate of spanning fragments: "
+			<< stats.dup_frags << "/"
+			<< stats.total_frags << " ("
+			<< setprecision(3) << prop_dups << "%)\n";
+		if (prop_dups > 50)
+			cerr << PROGRAM << ": warning: duplicate rate of fragments "
+				"spanning more than one contig is high.\n";
+	}
+
+	vals += make_vector<int>()
+		<< stats.total_frags
+		<< stats.dup_frags;
+
+		keys += make_vector<string>()
+			<< "total_frags"
+			<< "dupl_frags";
+
+	if (!opt::db.empty()) {
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
+
 	if (opt::verbose > 0 && g_recMA != opt::minAlign)
 		cerr << PROGRAM << ": warning: MLE will be more accurate if "
 			"l is decreased to " << g_recMA << ".\n";

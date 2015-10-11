@@ -1,6 +1,7 @@
 #!/usr/bin/make -rRf
 # Run the ABySS assembler.
-# Written by Shaun Jackman <sjackman@bcgsc.ca>.
+# Written by Shaun Jackman <sjackman@bcgsc.ca> and
+# Anthony Raymond <traymond@bcgsc.ca>.
 
 # Set pipefail to require that all commands of a pipe must succeed.
 SHELL=/bin/bash -o pipefail
@@ -84,15 +85,27 @@ mpirun=mpirun
 endif
 
 # Determine the path to the ABySS executables
-path?=$(shell if ! which ABYSS >/dev/null 2>/dev/null; then \
-	dirname $(MAKEFILE_LIST); fi)
+path?=$(shell dirname `which $(MAKEFILE_LIST)`)
 ifdef path
 PATH:=$(path):$(PATH)
 endif
 
-ifdef lib
+ifdef db
+# Determine the location of sqlite database
+override dbopt:=--db=$(db)
+
+# Track data details for database
+library ?= ""
+strain ?= ""
+species ?= ""
+endif
+
+# Programs
+MARKDOWN=multimarkdown
+
 map=$(foreach a,$(2),$(call $(1),$(a)))
 deref=$($1)
+ifdef lib
 in?=$(call map, deref, $(lib))
 else
 ifdef in
@@ -111,9 +124,17 @@ ifdef se
 override se:=$(strip $(se))
 endif
 
+# Graph file format
+graph?=dot
+# g is private. Use graph instead.
+override g:=$(graph)
+
 # ABYSS parameters
 q ?= 3
 abyssopt += -k$k -q$q
+ifdef K
+abyssopt += -K$K
+endif
 ifdef e
 abyssopt += -e$e
 endif
@@ -130,7 +151,13 @@ ifdef b
 abyssopt += -b$b
 pbopt += -b$b
 endif
-abyssopt += $v --coverage-hist=coverage.hist -s $*-bubbles.fa
+ifdef Q
+abyssopt += -Q$Q
+endif
+ifdef ss
+SS=--SS
+endif
+abyssopt += $v $(dbopt) $(SS) --coverage-hist=coverage.hist -s $*-bubbles.fa
 
 # Number of threads
 ifdef PE_HOSTFILE
@@ -146,25 +173,70 @@ endif
 
 # AdjList parameters
 m?=50
+alopt += $v $(dbopt) $(SS) -k$k -m$m
+ifdef K
+alopt += -K$K
+endif
+
+# filtergraph parameters
+ifdef K
+fgopt += --assemble --shim-max-degree=2
+endif
+ifdef xtip
+fgopt += -t$(shell echo $k*2 |bc)
+endif
 
 # PopBubbles parameters
 p?=0.9
 pbopt += -p$p
+ifdef a
+pbopt += -a$a
+endif
+
+# Keep sequence and quality strings of read alignments
+ifdef ssq
+ssq_t :=-ssq
+endif
 
 # Aligner parameters
-aligner?=map
+aligner?=map$(ssq_t)
+ifeq ($(SS),--SS)
+ ifneq ($(aligner),map$(ssq_t))
+  $(warning warning: setting aligner to abyss-map$(ssq_t) since other aligners do not support ss=1)
+  override aligner=map$(ssq_t)
+ endif
+endif
+
 align?=abyss-$(aligner)
-mapopt=$v -j$j -l$($*_l) $(ALIGNER_OPTIONS) $(MAP_OPTIONS)
+mapopt=$v $(dbopt) -j$j -l$($*_l) $(SS) $(ALIGNER_OPTIONS) $(MAP_OPTIONS)
+
+# DIDA parameters
+escape_quotes=$(shell echo "$(1)" | sed 's|"|\\\"|g')
+ifeq ($(aligner),dida)
+   ifdef np
+       mapopt+=-n$(np)
+   endif
+   ifdef DIDA_RUN_OPTIONS
+       mapopt+=$(DIDA_RUN_OPTIONS)
+   endif
+   ifdef DIDA_MPIRUN
+       mapopt+=-m"$(call escape_quotes,$(DIDA_MPIRUN))"
+   endif
+   ifdef DIDA_OPTIONS
+       mapopt+=-d"$(call escape_quotes,$(DIDA_OPTIONS))"
+   endif
+endif
 
 # fixmate parameters
 ifeq ($(align),abyss-kaligner)
 fixmate?=ParseAligns
 else
-fixmate?=abyss-fixmate
+fixmate?=abyss-fixmate$(ssq_t)
 endif
-fmopt=$v -l$($*_l) $(FIXMATE_OPTIONS)
+fmopt=$v $(dbopt) -l$($*_l) $(FIXMATE_OPTIONS)
 
 # DistanceEst parameters
+DistanceEst?=DistanceEst$(ssq_t)
 l?=$k
 s?=200
 n?=10
@@ -172,30 +244,42 @@ libs=$(pe) $(mp)
 $(foreach i,$(libs),$(eval $i_l?=$l))
 $(foreach i,$(libs),$(eval $i_s?=$s))
 $(foreach i,$(libs),$(eval $i_n?=$n))
-deopt=$v -j$j -k$k -l$($*_l) -s$($*_s) -n$($*_n) $($*_de) \
+deopt=$v $(dbopt) -j$j -k$k -l$($*_l) -s$($*_s) -n$($*_n) $($*_de) \
 	$(DISTANCEEST_OPTIONS)
 
 # SimpleGraph parameters
+sgopt += $(dbopt)
 ifdef d
 sgopt += -d$d
 endif
 
+# MergePaths parameters
+mpopt += $v $(dbopt) -j$j -k$k
+
+# PathOverlap parameters
+poopt += $v $(dbopt) -k$k
+
 # PathConsensus parameters
+pcopt += $(dbopt)
 ifdef a
 pcopt += -a$a
 endif
 pcopt += -p$p
 
+# MergeContigs parameters
+mcopt += $v $(dbopt) -k$k
+
 # Scaffold parameters
 S?=$s
 N?=$n
+scopt += $v $(dbopt) $(SS) -k$k
 
 # BWA-SW parameters
 bwaswopt=-t$j
 BWASW_OPTIONS='-b9 -q16 -r1 -w500'
 
 # Remove environment variables
-unexport in se $(lib) $(pe) $(mp)
+unexport in se $(lib) $(pe) $(mp) $(long)
 
 # Check the mandatory parameters
 
@@ -234,12 +318,13 @@ Report bugs to <abyss-users@bcgsc.ca>.\n'
 
 version:
 	@printf '\
-abyss-pe (ABySS) 1.3.5\n\
-Written by Shaun Jackman.\n\
+abyss-pe (ABySS) 1.9.0\n\
+Written by Shaun Jackman and Anthony Raymond.\n\
 \n\
 Copyright 2012 Canada'\''s Michael Smith Genome Science Centre\n'
 
 versions: version
+	@echo PATH=$(PATH)
 	@ABYSS --version; echo
 	@-ABYSS-P --version; echo
 	@AdjList --version; echo
@@ -256,6 +341,7 @@ versions: version
 	@abyss-fixmate --version; echo
 	@abyss-map --version; echo
 	@abyss-scaffold --version; echo
+	@abyss-sealer --version; echo
 	@abyss-todot --version; echo
 	@$(align) --version; echo
 	@awk --version; echo
@@ -263,19 +349,28 @@ versions: version
 	@-mpirun --version
 
 # Determine the default target
+ifdef db
+default: startDb
+endif
 default: unitigs
 ifneq ($(in),)
-default: contigs contigs-dot
+default: contigs contigs-graph
 endif
 ifneq ($(mp),)
-default: scaffolds scaffolds-dot
+default: scaffolds scaffolds-graph
+ifneq ($(long),)
+default: long-scaffs long-scaffs-graph
+endif
+endif
+ifdef db
+default: finishDb
 endif
 default: stats
 
 # Define the commands (phony targets)
 unitigs: $(name)-unitigs.fa
 
-unitigs-dot: $(name)-unitigs.dot
+unitigs-graph: $(name)-unitigs.$g
 
 pe-index: $(name)-3.fa.fm
 
@@ -285,7 +380,7 @@ pe-bam: $(addsuffix -3.bam.bai, $(pe))
 
 contigs: $(name)-contigs.fa
 
-contigs-dot: $(name)-contigs.dot
+contigs-graph: $(name)-contigs.$g
 
 mp-index: $(name)-6.fa.fm
 
@@ -295,22 +390,40 @@ mp-bam: $(addsuffix -6.bam.bai, $(mp))
 
 scaffolds: $(name)-scaffolds.fa
 
-scaffolds-dot: $(name)-scaffolds.dot
+scaffolds-graph: $(name)-scaffolds.$g
+
+seal-scaffolds: $(name)-scaffolds-sealed.fa
+
+scaftigs: $(name)-scaftigs.fa $(name)-scaftigs.agp
+
+long-scaffs: $(name)-long-scaffs.fa
+
+long-scaffs-graph: $(name)-long-scaffs.$g
 
 all: default bam stats
 
 clean:
-	rm -f *.adj *.dot *.sam.gz *.hist *.dist *.path *.path[123]
+	rm -f *.adj *.asqg *.dot *.gfa *.sam *.txt \
+		*.sam.gz *.hist *.dist *.path *.path[123]
+
+ifdef db
+.PHONY: startDb finishDb
+endif
 
 .PHONY: bam default stats \
-	unitigs unitigs-dot \
-	pe-index pe-sam pe-bam contigs contigs-dot \
-	mp-index mp-sam mp-bam scaffolds scaffolds-dot \
+	unitigs unitigs-graph \
+	pe-index pe-sam pe-bam contigs contigs-graph \
+	mp-index mp-sam mp-bam scaffolds scaffolds-graph \
+	scaftigs long-scaffs long-scaffs-graph seal-scaffolds \
 	all clean help version versions
+
 .DELETE_ON_ERROR:
 .SECONDARY:
 
 # Utilities
+
+%.fa.fai: %.fa
+	abyss-index $v --fai $<
 
 %.fa.fm: %.fa
 	abyss-index $v $<
@@ -323,40 +436,69 @@ clean:
 
 # Assemble unitigs
 
-%-1.fa:
+ifdef db
+startDb:
+	@echo -e \
+	$(name)".sqlite\n"\
+	> name.txt
+	@echo -e \
+	$(shell echo `date +%s`"_"`whoami`_)\
+	$(shell echo $$RANDOM \% 1000 \+ 1 | bc)"\n"\
+	$(library)"\n"\
+	$(strain)"\n"\
+	$(species)"\n"\
+	$(name)"\n"\
+	$(k)"\n"\
+	$(lib)$(in)$(se)\
+	> db.txt
+endif
+
+ifdef K
 ifdef np
+%-1.fa:
+	$(mpirun) -np $(np) abyss-paired-dbg-mpi $(abyssopt) $(ABYSS_OPTIONS) -o $*-1.fa $(in) $(se)
+else
+%-1.fa %-1.$g:
+	abyss-paired-dbg $(abyssopt) $(ABYSS_OPTIONS) -o $*-1.fa -g $*-1.$g $(in) $(se)
+endif
+
+else
+ifdef np
+%-1.fa:
 	$(mpirun) -np $(np) ABYSS-P $(abyssopt) $(ABYSS_OPTIONS) -o $@ $(in) $(se)
 else
+%-1.fa:
 	ABYSS $(abyssopt) $(ABYSS_OPTIONS) -o $@ $(in) $(se)
+endif
 endif
 
 # Find overlapping contigs
 
-%-1.adj: %-1.fa
-	AdjList $v -k$k -m$m $< >$@
+%-1.$g: %-1.fa
+	AdjList $(alopt) --$g $< >$@
 
 # Remove shim contigs
 
-%-2.adj: %-1.adj
-	abyss-filtergraph $v -k$k -g $@ $^ >$*-1.path
+%-2.$g1 %-1.path: %-1.$g %-1.fa
+	abyss-filtergraph $v --$g $(fgopt) $(FILTERGRAPH_OPTIONS) -k$k -g $*-2.$g1 $^ >$*-1.path
+
+%-2.fa %-2.$g: %-1.fa %-2.$g1 %-1.path
+	MergeContigs $(mcopt) -g $*-2.$g -o $*-2.fa $^
 
 # Pop bubbles
 
-%-2.path %-3.adj: %-1.fa %-2.adj
-	PopBubbles $v -j$j -k$k $(pbopt) $(POPBUBBLES_OPTIONS) -g $*-3.adj $^ >$*-2.path
+%-2.path %-3.$g: %-2.fa %-2.$g
+	PopBubbles $v --$g -j$j -k$k $(SS) $(pbopt) $(POPBUBBLES_OPTIONS) -g $*-3.$g $^ >$*-2.path
 
-%-3.fa: %-1.fa %-2.adj %-2.path
-	MergeContigs $v -k$k -o $@ $^
+%-3.fa: %-2.fa %-2.$g %-2.path
+	MergeContigs $(mcopt) -o $@ $^
 	awk '!/^>/ {x[">" $$1]=1; next} {getline s} $$1 in x {print $$0 "\n" s}' \
 		$*-2.path $*-1.fa >$*-indel.fa
-
-%-3.dot: %-3.adj
-	abyss-todot $v -k$k $< >$@
 
 %-unitigs.fa: %-3.fa
 	ln -sf $< $@
 
-%-unitigs.dot: %-3.dot
+%-unitigs.$g: %-3.$g
 	ln -sf $< $@
 
 # Estimate distances between unitigs
@@ -375,17 +517,17 @@ endif
 
 %-3.dist: %-3.sam.gz %-3.hist
 	gunzip -c $< \
-	|DistanceEst $(deopt) -o $@ $*-3.hist
+	|$(DistanceEst) $(deopt) -o $@ $*-3.hist
 
 %-3.dist: %-3.bam %-3.hist
 	samtools view -h $< \
-	|DistanceEst $(deopt) -o $@ $*-3.hist
+	|$(DistanceEst) $(deopt) -o $@ $*-3.hist
 
 %-3.dist: $(name)-3.fa
 	$(align) $(mapopt) $(strip $($*)) $< \
 		|$(fixmate) $(fmopt) -h $*-3.hist \
 		|sort -snk3 -k4 \
-		|DistanceEst $(deopt) -o $@ $*-3.hist
+		|$(DistanceEst) $(deopt) -o $@ $*-3.hist
 
 dist=$(addsuffix -3.dist, $(pe))
 
@@ -399,37 +541,38 @@ endif
 
 # Find overlaps between contigs
 
-%-4.fa %-4.adj: %-3.fa %-3.adj %-3.dist
-	Overlap $v $(OVERLAP_OPTIONS) -k$k -g $*-4.adj -o $*-4.fa $^
+%-4.fa %-4.$g: %-3.fa %-3.$g %-3.dist
+	Overlap $v --$g $(SS) $(OVERLAP_OPTIONS) -k$k -g $*-4.$g -o $*-4.fa $^
 
 # Assemble contigs
 
-%-4.path1: %-4.adj %-3.dist
+%-4.path1: %-4.$g %-3.dist
 	SimpleGraph $v $(sgopt) $(SIMPLEGRAPH_OPTIONS) -j$j -k$k -o $@ $^
 
-%-4.path2: %-4.adj %-4.path1
-	MergePaths $v $(MERGEPATHS_OPTIONS) -j$j -k$k -o $@ $^
+%-4.path2: %-4.path1 %-3.fa.fai %-4.fa.fai
+	cat $*-3.fa.fai $*-4.fa.fai \
+		|MergePaths $(mpopt) $(MERGEPATHS_OPTIONS) -o $@ - $<
 
-%-4.path3: %-4.adj %-4.path2
-	PathOverlap --assemble $v -k$k $^ >$@
+%-4.path3: %-4.$g %-4.path2
+	PathOverlap --assemble $(poopt) $(SS) $^ >$@
 
 ifndef cs
 
-%-5.path %-5.fa %-5.adj: %-3.fa %-4.fa %-4.adj %-4.path3
+%-5.path %-5.fa %-5.$g: %-3.fa %-4.fa %-4.$g %-4.path3
 	cat $(wordlist 1, 2, $^) \
-		|PathConsensus $v -k$k $(pcopt) -o $*-5.path -s $*-5.fa -g $*-5.adj - $(wordlist 3, 4, $^)
+		|PathConsensus $v --$g -k$k $(pcopt) -o $*-5.path -s $*-5.fa -g $*-5.$g - $(wordlist 3, 4, $^)
 
-%-6.fa: %-3.fa %-4.fa %-5.fa %-5.adj %-5.path
-	cat $(wordlist 1, 3, $^) |MergeContigs $v -k$k -o $@ - $(wordlist 4, 5, $^)
+%-6.fa: %-3.fa %-4.fa %-5.fa %-5.$g %-5.path
+	cat $(wordlist 1, 3, $^) |MergeContigs $(mcopt) -o $@ - $(wordlist 4, 5, $^)
 
 else
 
-%-5.adj %-5.path: %-4.adj %-4.path3
-	ln -sf $*-4.adj $*-5.adj
+%-5.$g %-5.path: %-4.$g %-4.path3
+	ln -sf $*-4.$g $*-5.$g
 	ln -sf $*-4.path3 $*-5.path
 
-%-cs.fa: %-3.fa %-4.fa %-4.adj %-4.path3
-	cat $(wordlist 1, 2, $^) |MergeContigs $v -k$k -o $@ - $(wordlist 3, 4, $^)
+%-cs.fa: %-3.fa %-4.fa %-4.$g %-4.path3
+	cat $(wordlist 1, 2, $^) |MergeContigs $(mcopt) -o $@ - $(wordlist 3, 4, $^)
 
 # Convert colour-space sequence to nucleotides
 
@@ -439,13 +582,13 @@ else
 
 endif
 
-%-6.dot: %-5.adj %-5.path
-	PathOverlap --overlap $v --dot -k$k $^ >$@
+%-6.$g: %-5.$g %-5.path
+	PathOverlap --overlap $(poopt) --$g $^ >$@
 
 %-contigs.fa: %-6.fa
 	ln -sf $< $@
 
-%-contigs.dot: %-6.dot
+%-contigs.$g: %-6.$g
 	ln -sf $< $@
 
 # Estimate distances between contigs
@@ -464,38 +607,92 @@ endif
 
 %-6.dist.dot: %-6.sam.gz %-6.hist
 	gunzip -c $< \
-	|DistanceEst --dot $(deopt) -o $@ $*-6.hist
+	|$(DistanceEst) --dot $(deopt) -o $@ $*-6.hist
 
 %-6.dist.dot: %-6.bam %-6.hist
 	samtools view -h $< \
-	|DistanceEst --dot $(deopt) -o $@ $*-6.hist
+	|$(DistanceEst) --dot $(deopt) -o $@ $*-6.hist
 
 %-6.dist.dot: $(name)-6.fa
 	$(align) $(mapopt) $(strip $($*)) $< \
 		|$(fixmate) $(fmopt) -h $*-6.hist \
 		|sort -snk3 -k4 \
-		|DistanceEst --dot $(deopt) -o $@ $*-6.hist
+		|$(DistanceEst) --dot $(deopt) -o $@ $*-6.hist
 
 # Scaffold
 
-%-6.path: $(name)-6.dot $(addsuffix -6.dist.dot, $(mp))
-	abyss-scaffold $v -k$k -s$S -n$N -g $@.dot $(SCAFFOLD_OPTIONS) $^ >$@
+%-6.path: $(name)-6.$g $(addsuffix -6.dist.dot, $(mp))
+	abyss-scaffold $(scopt) -s$S -n$N -g $@.dot $(SCAFFOLD_OPTIONS) $^ >$@
 
-%-7.path %-7.adj %-7.fa: %-6.fa %-6.dot %-6.path
-	PathConsensus $v -k$k $(pcopt) -s $*-7.fa -g $*-7.adj -o $*-7.path $^
+%-7.path %-7.$g %-7.fa: %-6.fa %-6.$g %-6.path
+	PathConsensus $v --$g -k$k $(pcopt) -s $*-7.fa -g $*-7.$g -o $*-7.path $^
 
-%-8.fa: %-6.fa %-7.fa %-7.adj %-7.path
+%-8.fa: %-6.fa %-7.fa %-7.$g %-7.path
 	cat $(wordlist 1, 2, $^) \
-		|MergeContigs $v -k$k -o $*-8.fa - $(wordlist 3, 4, $^)
+		|MergeContigs $(mcopt) -o $@ - $(wordlist 3, 4, $^)
 
-%-8.dot: %-7.adj %-7.path
-	PathOverlap --overlap $v --dot -k$k $^ >$@
+%-8.$g: %-7.$g %-7.path
+	PathOverlap --overlap $(poopt) --$g $^ >$@
 
 %-scaffolds.fa: %-8.fa
 	ln -sf $< $@
 
-%-scaffolds.dot: %-8.dot
+%-scaffolds.$g: %-8.$g
 	ln -sf $< $@
+
+# Sealed Scaffold
+sealer_ks?=-k90 -k80 -k70 -k60 -k50 -k40 -k30
+
+%-8_scaffold.fa: %-8.fa
+	abyss-sealer -v -j$j --print-flanks -o$*-8 -S$< $(sealer_ks) $(SEALER_OPTIONS) $(in) $(se)
+
+%-scaffolds-sealed.fa: %-8_scaffold.fa
+	ln -s $< $@
+
+# Scaftig
+
+%-scaftigs.fa: %-scaffolds-agp.fa
+	ln -sf $< $@
+
+%-scaftigs.agp: %-scaffolds.agp
+	ln -sf $< $@
+
+# Transcriptome assisted scaffolding
+
+%.fa.bwt: %.fa
+	bwa index $<
+
+%-8.sam.gz: $(name)-8.fa.bwt
+	bwa mem -a -t$j -S -P -k$l $(name)-8.fa $(strip $($*)) \
+		|gzip >$@
+
+%-8.dist.dot: %-8.sam.gz
+	abyss-longseqdist -k$k $(LONGSEQDIST_OPTIONS) $< \
+		|grep -v "l=" >$@
+
+%-8.path: $(name)-8.$g $(addsuffix -8.dist.dot, $(long))
+	abyss-scaffold $(scopt) -s$S -n1 -g $@.$g $(SCAFFOLD_OPTIONS) $^ >$@
+
+%-9.path %-9.$g %-9.fa: %-8.fa %-8.$g %-8.path
+	PathConsensus $v --$g -k$k $(pcopt) -s $*-9.fa -g $*-9.$g -o $*-9.path $^
+
+%-10.fa: %-8.fa %-9.fa %-9.$g %-9.path
+	cat $(wordlist 1, 2, $^) \
+		|MergeContigs $(mcopt) -o $@ - $(wordlist 3, 4, $^)
+
+%-10.$g: %-9.$g %-9.path
+	PathOverlap --overlap $(poopt) --$g $^ >$@
+
+%-long-scaffs.fa: %-10.fa
+	ln -sf $< $@
+
+%-long-scaffs.$g: %-10.$g
+	ln -sf $< $@
+
+ifdef db
+finishDb:
+	@rm -f db.txt
+endif
 
 # Create the final BAM file
 
@@ -516,14 +713,11 @@ $(name)-unitigs.bam: %.bam: %.fa
 $(name)-contigs.bam $(name)-scaffolds.bam: %.bam: %.fa
 	$(align) $v -j$j -l$l $(ALIGNER_OPTIONS) \
 		$(call map, deref, $(sort $(lib) $(pe) $(mp))) $< \
-		|$(fixmate) $(fmopt) \
+		|$(fixmate) $v $(FIXMATE_OPTIONS) \
 		|sort -snk3 -k4 \
 		|samtools view -Sb - >$@
 
 # Align the variants to the assembly
-
-%.fa.bwt: %.fa
-	bwa index $<
 
 %-variants.bam: %.fa.bwt
 	bwa bwasw -t$j $*.fa <(cat $(name)-bubbles.fa $(name)-indel.fa) \
@@ -537,17 +731,35 @@ $(name)-contigs.bam $(name)-scaffolds.bam: %.bam: %.fa
 
 # Calculate assembly contiguity statistics
 
-stats: $(name)-stats
+stats: $(name)-stats.tab $(name)-stats $(name)-stats.csv $(name)-stats.md
+ifneq ($(shell which $(MARKDOWN) 2>/dev/null),)
+stats: $(name)-stats.html
+endif
 
-$(name)-stats: %-stats: %-unitigs.fa
+%-stats: %-stats.tab
+	ln -sf $< $@
+
+$(name)-stats.tab: %-stats.tab: %-unitigs.fa
 ifneq ($(in),)
-$(name)-stats: %-stats: %-contigs.fa
+$(name)-stats.tab: %-stats.tab: %-contigs.fa
 endif
 ifneq ($(mp),)
-$(name)-stats: %-stats: %-scaffolds.fa
+$(name)-stats.tab: %-stats.tab: %-scaffolds.fa
 endif
-$(name)-stats:
+ifneq ($(long),)
+$(name)-stats.tab: %-stats.tab: %-long-scaffs.fa
+endif
+$(name)-stats.tab:
 	abyss-fac $(FAC_OPTIONS) $^ |tee $@
+
+%.csv: %.tab
+	tr '\t' , <$< >$@
+
+%.md: %.tab
+	abyss-tabtomd $< >$@
+
+%.html: %.md
+	$(MARKDOWN) $< >$@
 
 # Create an AGP file and FASTA file of scaftigs from scaffolds
 
@@ -563,3 +775,29 @@ $(name)-stats:
 
 %.break: %.sam.gz
 	abyss-samtobreak $(SAMTOBREAK_OPTIONS) $< >$@
+
+# Report ABySS configuration variable(s) and value(s) currently set.
+
+override varList := a b c d e E j k l m n N p q s S t v cs pi \
+	np pe lib mp se SS hostname xtip \
+	ssq ssq_ti libs path name in mpirun \
+	aligner long ref fixmate DistanceEst \
+	map deref abyssopt fgopt pbopt \
+	align mapopt fmopt deopt \
+	pcopt sgopt bwaswopt \
+	ABYSS_OPTIONS FILTERGRAPH_OPTIONS POPBUBBLES_OPTIONS \
+	OVERLAP_OPTIONS SIMPLEGRAPH_OPTIONS MERGEPATHS_OPTIONS \
+	SCAFFOLD_OPTIONS ALIGNER_OPTIONS MAP_OPTIONS FAC_OPTIONS \
+	FIXMATE_OPTIONS BWASW_OPTIONS FATOAGP_OPTIONS SAMTOBREAK_OPTIONS \
+	MARKDOWN
+
+env:
+	@echo -e "\
+	List of ABySS configuration variables currently set:\n\n\
+	[environment], if variable was inherited from the environment.\n\
+	[command line], if variable was defined on the command line.\n\
+	[file], if variable was defined in (this) makefile.\n\
+	[override], if variable was defined with an override directive in (this) makefile.\n"
+
+	@$(foreach var,$(varList),\
+		echo -e $(var)" = "$($(var))"\t["$(origin $(var))"]" | grep -v "undefined";)

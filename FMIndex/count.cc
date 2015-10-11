@@ -22,10 +22,10 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... [FASTA]\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... [FASTA]\n"
 "Count k-mer of the specified file.\n"
 "The index file TARGET.fm will be used if present.\n"
 "\n"
@@ -160,8 +160,6 @@ static void readFMIndex(FMIndex& g, const string& faPath)
 
 int main(int argc, char** argv)
 {
-	checkPopcnt();
-
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {

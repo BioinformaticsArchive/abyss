@@ -31,7 +31,7 @@ struct Length
 	template <typename T>
 	Length& operator+=(const T& o)
 	{
-		assert((int)length + (int)o.distance > 0);
+		assert((int)length + (int)o.distance >= 0);
 		length += o.distance;
 		return *this;
 	}
@@ -220,11 +220,11 @@ struct EdgeWeightMap {
 	reference operator[](const key_type& e) const
 	{
 		int weight = m_g[e].distance + m_g[target(e, m_g)].length;
-		if (weight <= 0)
+		if (weight < 0)
 			std::cerr << "error: invalid edge: "
 				<< get(edge_name, m_g, e)
 				<< " [" << get(edge_bundle, m_g, e) << "]\n";
-		assert(weight > 0);
+		assert(weight >= 0);
 		return weight;
 	}
 

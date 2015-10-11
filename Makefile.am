@@ -2,7 +2,16 @@ if HAVE_LIBMPI
 Parallel=Parallel
 endif
 
-dist_doc_DATA = ChangeLog COPYRIGHT LICENSE \
+if HAVE_PTHREAD
+GTest=lib/gtest-1.7.0
+UnitTest=Unittest
+endif
+
+dist_doc_DATA = \
+	ChangeLog \
+	CITATION.bib CITATION.md \
+	COPYRIGHT \
+	LICENSE \
 	README.css README.html README.md
 
 EXTRA_DIST=doxygen.conf
@@ -10,31 +19,43 @@ EXTRA_DIST=doxygen.conf
 SUBDIRS = \
 	bin \
 	doc \
-	Assembly \
 	Common \
-	DataLayer \
-	FMIndex \
 	Graph \
+	DataLayer \
+	DataBase \
+	FMIndex \
+	Assembly \
 	dialign \
 	Align \
 	ABYSS $(Parallel) \
-	AdjList \
+	Bloom \
+	Konnector \
 	Consensus \
 	DAssembler \
 	DistanceEst \
 	KAligner \
 	Layout \
+	LogKmerCount \
 	Map \
 	MergePaths \
 	Misc \
 	Overlap \
+	PairedDBG \
 	ParseAligns \
 	PathOverlap \
 	PopBubbles \
 	Scaffold \
 	SimpleGraph \
 	kmerprint \
-	FilterGraph
+	FilterGraph \
+	GapFiller \
+	Sealer \
+	AdjList \
+	$(GTest) \
+	$(UnitTest)
 
 %.html: %.md
 	-multimarkdown $< >$@
+
+clean-local:
+	rm -f README.html

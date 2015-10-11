@@ -1,4 +1,4 @@
-.TH ABYSS "1" "2013-Mar" "ABYSS (ABySS) 1.3.5" "User Commands"
+.TH ABYSS "1" "2015-May" "ABYSS (ABySS) 1.9.0" "User Commands"
 .SH NAME
 ABYSS \- assemble short reads into contigs
 .SH SYNOPSIS
@@ -32,6 +32,9 @@ do not trim masked bases from the ends of reads
 \fB-q\fR, \fB--trim-quality\fR=\fITHRESHOLD\fR
 trim bases from the ends of reads whose quality is less than the
 threshold
+.TP
+\fB-Q\fR, \fB--mask-quality\fR=\fITHRESHOLD\fR
+mask all bases in reads whose quality is less than the threshold
 .TP
 \fB--standard-quality\fR
 zero quality is `!' (33)
@@ -91,4 +94,4 @@ Written by Jared Simpson and Shaun Jackman.
 .SH "REPORTING BUGS"
 Report bugs to <abyss-users@bcgsc.ca>.
 .SH COPYRIGHT
-Copyright 2013 Canada's Michael Smith Genome Science Centre
+Copyright 2015 Canada's Michael Smith Genome Sciences Centre

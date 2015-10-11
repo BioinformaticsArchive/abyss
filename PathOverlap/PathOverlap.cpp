@@ -15,27 +15,28 @@
 #include <cstring> // for strerror
 #include <cstdlib>
 #include <functional>
-#include <string>
-#include <sstream>
 #include <iostream>
-#include <iterator>
 #include <fstream>
 #include <getopt.h>
 #include <map>
 #include <vector>
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
 
 #define PROGRAM "PathOverlap"
 
+DB db;
+
 static const char *VERSION_MESSAGE =
 PROGRAM " (ABySS) " VERSION "\n"
 "Written by Shaun Jackman and Tony Raymond.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char *USAGE_MESSAGE =
-"Usage: " PROGRAM " [OPTION]... ADJ PATH\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... ADJ PATH\n"
 "Find paths that overlap. Either output the graph of overlapping\n"
 "paths, assemble overlapping paths into larger paths, or trim the\n"
 "overlapping paths.\n"
@@ -53,16 +54,27 @@ static const char *USAGE_MESSAGE =
 "      --overlap         find overlapping paths [default]\n"
 "      --assemble        assemble overlapping paths\n"
 "      --trim            trim overlapping paths\n"
-"      --adj             output the graph in adj format [default]\n"
-"      --dot             output the graph in dot format\n"
+"      --adj             output the graph in ADJ format [default]\n"
+"      --asqg            output the graph in ASQG format\n"
+"      --dot             output the graph in GraphViz format\n"
+"      --gv              output the graph in GraphViz format\n"
+"      --gfa             output the graph in GFA format\n"
 "      --sam             output the graph in SAM format\n"
+"      --SS              expect contigs to be oriented correctly\n"
+"      --no-SS           no assumption about contig orientation [default]\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for sqlite\n"
+"      --strain=NAME     specify strain NAME for sqlite\n"
+"      --species=NAME    specify species NAME for sqlite\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k;
 
 	/** Output format. */
@@ -73,6 +85,9 @@ namespace opt {
 
 	/** Output the IDs of contigs in overlaps to this file. */
 	static string repeatContigs;
+
+	/** Run a strand-specific RNA-Seq assembly. */
+	static int ss;
 
 	/** Mode of operation. */
 	enum {
@@ -90,7 +105,8 @@ namespace opt {
 
 static const char* shortopts = "g:k:r:v";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION };
 
 static const struct option longopts[] = {
 	{ "graph",        required_argument, NULL, 'g' },
@@ -98,13 +114,22 @@ static const struct option longopts[] = {
 	{ "assemble",     no_argument,       &opt::mode, opt::ASSEMBLE },
 	{ "overlap",      no_argument,       &opt::mode, opt::OVERLAP },
 	{ "trim",         no_argument,       &opt::mode, opt::TRIM },
-	{ "adj",          no_argument,       &opt::format, ADJ, },
-	{ "dot",          no_argument,       &opt::format, DOT, },
-	{ "sam",          no_argument,       &opt::format, SAM, },
+	{ "adj",          no_argument,       &opt::format, ADJ },
+	{ "asqg",         no_argument,       &opt::format, ASQG },
+	{ "dot",          no_argument,       &opt::format, DOT },
+	{ "gv",           no_argument,       &opt::format, DOT },
+	{ "gfa",          no_argument,       &opt::format, GFA },
+	{ "sam",          no_argument,       &opt::format, SAM },
+	{ "SS",           no_argument,       &opt::ss, 1 },
+	{ "no-SS",        no_argument,       &opt::ss, 0 },
 	{ "repeats",      required_argument, NULL, 'r' },
 	{ "verbose",      no_argument,       NULL, 'v' },
 	{ "help",         no_argument,       NULL, OPT_HELP },
 	{ "version",      no_argument,       NULL, OPT_VERSION },
+	{ "db",           required_argument, NULL, OPT_DB },
+	{ "library",      required_argument, NULL, OPT_LIBRARY },
+	{ "strain",       required_argument, NULL, OPT_STRAIN },
+	{ "species",      required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -472,15 +497,21 @@ static ContigPath mergePaths(const Paths& paths,
 
 /** Return true if the edge e is a path overlap. */
 struct IsPathOverlap : unary_function<edge_descriptor, bool> {
-	IsPathOverlap(const Graph& g, const OverlapMap& pmap)
-		: m_g(g), m_pmap(pmap) { }
+	IsPathOverlap(const Graph& g, const OverlapMap& pmap,
+			const IsPositive<Graph>& pred)
+		: m_g(g), m_pmap(pmap), m_isPositive(pred) { }
 	bool operator()(edge_descriptor e) const
 	{
-		return getOverlap(m_pmap, source(e, m_g), target(e, m_g));
+		bool stranded = true;
+		if (opt::ss)
+			stranded = m_isPositive(e);
+		return stranded &&
+			getOverlap(m_pmap, source(e, m_g), target(e, m_g));
 	}
   private:
 	const Graph& m_g;
 	const OverlapMap& m_pmap;
+	const IsPositive<Graph>& m_isPositive;
 };
 
 /** Assemble overlapping paths. */
@@ -507,7 +538,7 @@ static void assembleOverlappingPaths(Graph& g,
 	// Assemble unambiguously overlapping paths.
 	Paths merges;
 	assemble_if(g, back_inserter(merges),
-			IsPathOverlap(g, overlapMap));
+			IsPathOverlap(g, overlapMap, IsPositive<Graph>(g)));
 
 	// Merge overlapping paths.
 	g_contigNames.unlock();
@@ -544,6 +575,9 @@ int main(int argc, char** argv)
 		commandLine = ss.str();
 	}
 
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -560,6 +594,14 @@ int main(int argc, char** argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db; break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0]; break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1]; break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -662,6 +704,17 @@ int main(int argc, char** argv)
 				it != s_trimmedContigs.end(); ++it)
 			out << get(g_contigNames, *it) << '\n';
 		assert_good(out, opt::repeatContigs);
+	}
+
+	if (!opt::db.empty()) {
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars);
+		addToDb(db, "SS", opt::ss);
+		addToDb(db, "K", opt::k);
 	}
 
 	return 0;

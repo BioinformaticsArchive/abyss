@@ -33,7 +33,7 @@ std::ostream& write_asqg(std::ostream& out, Graph& g)
 		out << "VT\t" << get(vertex_contig_name, g, u)
 			<< "\t*\tLN:i:" << vp.length;
 		if (vp.coverage > 0)
-			out << "\tXC:i:" << vp.coverage;
+			out << "\tKC:i:" << vp.coverage;
 		out << '\n';
 	}
 
@@ -42,11 +42,16 @@ std::ostream& write_asqg(std::ostream& out, Graph& g)
 		E e = *eit;
 		V u = source(e, g);
 		V v = target(e, g);
-		if (v < u || get(vertex_removed, g, u))
+		if (get(vertex_removed, g, u))
 			continue;
+
+		// Output only the canonical edge.
+		if (u > get(vertex_complement, g, v))
+			continue;
+
 		assert(!get(vertex_removed, g, v));
 		int distance = g[e].distance;
-		assert(distance < 0);
+		assert(distance <= 0);
 		unsigned overlap = -distance;
 		unsigned ulen = g[u].length;
 		unsigned vlen = g[v].length;
@@ -55,10 +60,10 @@ std::ostream& write_asqg(std::ostream& out, Graph& g)
 		out << "ED\t" << get(vertex_contig_name, g, u)
 			<< ' ' << get(vertex_contig_name, g, v)
 			<< ' ' << (usense ? 0 : ulen - overlap)
-			<< ' ' << (usense ? overlap : ulen) - 1
+			<< ' ' << int((usense ? overlap : ulen) - 1)
 			<< ' ' << ulen
 			<< ' ' << (!vsense ? 0 : vlen - overlap)
-			<< ' ' << (!vsense ? overlap : vlen) - 1
+			<< ' ' << int((!vsense ? overlap : vlen) - 1)
 			<< ' ' << vlen
 			<< ' ' << (usense != vsense)
 			<< " -1\n"; // number of mismatches
@@ -98,11 +103,20 @@ std::istream& read_asqg(std::istream& in, Graph& g)
 				assert(in);
 			} else
 				length = seq.size();
+
+			unsigned coverage = 0;
+			if (in.peek() == '\t' && in.get() == '\t' && in.peek() == 'K') {
+				in >> expect("KC:i:") >> coverage;
+				assert(in);
+			}
+
 			in >> Ignore('\n');
+			assert(in);
 
 			if (addVertices) {
 				VP vp;
 				put(vertex_length, vp, length);
+				put(vertex_coverage, vp, coverage);
 				V u = add_vertex(vp, g);
 				put(vertex_name, g, u, uname);
 			} else {

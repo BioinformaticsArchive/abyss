@@ -1,7 +1,7 @@
 #ifndef FASTAWRITER_H
 #define FASTAWRITER_H 1
 
-#include "Sequence.h"
+#include "Common/Sequence.h"
 #include <cstdio>
 
 /** Output a FASTA file. */
@@ -23,6 +23,12 @@ class FastaWriter {
 		{
 			WriteSequence(seq, id, multiplicity, "");
 		}
+
+		void WriteSequence(const Sequence& seq, unsigned long long id,
+				const std::string& comment);
+
+		void WriteSequence(const Sequence& seq, const std::string& id,
+				const std::string& comment);
 
 	private:
 		const char *m_path;

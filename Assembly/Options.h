@@ -6,6 +6,7 @@
 
 namespace opt {
 	extern unsigned kmerSize;
+	extern unsigned singleKmerSize;
 	extern unsigned kMin;
 	extern unsigned kMax;
 	extern unsigned kStep;
@@ -14,6 +15,8 @@ namespace opt {
 	extern unsigned trimLen;
 	extern float coverage;
 	extern unsigned bubbleLen;
+	extern unsigned ss;
+	extern bool maskCov;
 	extern std::string coverageHistPath;
 	extern std::string contigsPath;
 	extern std::string contigsTempPath;
@@ -21,7 +24,14 @@ namespace opt {
 	extern std::string snpPath;
 	extern std::vector<std::string> inFiles;
 
+	extern std::string db;
+
 	void parse(int argc, char* const* argv);
+	extern std::string assemblyCmd;
+	std::vector<std::string> getMetaValue();
+	int getVvalue();
+	std::string getUvalue();
+	std::string getCommand();
 }
 
 #endif

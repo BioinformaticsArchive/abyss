@@ -30,10 +30,10 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Jared Simpson and Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... [FILE]...\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... [FILE]...\n"
 "Write pairs that map to the same contig to the file SAME.\n"
 "Write pairs that map to different contigs to standard output.\n"
 "Alignments may be read from FILE(s) or standard input.\n"

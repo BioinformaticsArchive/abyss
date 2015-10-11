@@ -2,6 +2,7 @@
 #define HISTOGRAM_H 1
 
 #include "StringUtil.h" // for toEng
+#include "VectorUtil.h" // for make_vector
 #include <cassert>
 #include <climits> // for INT_MAX
 #include <cmath>
@@ -149,10 +150,10 @@ class Histogram
 		return percentile(0.5);
 	}
 
-	/** Return the specified weighted percentile. */
-	T weightedPercentile(float p) const
+	/** Return the largest weight in the arg min of partial sum of
+	 * weights. */
+	T argMin(accumulator x) const
 	{
-		accumulator x = (accumulator)ceil(p * sum());
 		accumulator total = 0;
 		for (Map::const_iterator it = m_map.begin();
 				it != m_map.end(); ++it) {
@@ -161,6 +162,25 @@ class Histogram
 				return it->first;
 		}
 		return maximum();
+	}
+
+	/** Return the specified weighted percentile. */
+	T weightedPercentile(float p) const
+	{
+		return argMin((accumulator)ceil(p * sum()));
+	}
+
+	/** Return the expected value */
+	double expectedValue() const
+	{
+		double value = 0;
+		accumulator acc = sum();
+		for (Map::const_iterator it = m_map.begin();
+				it != m_map.end(); it++) {
+			value += (double)it->first * it->first
+				* it->second / acc;
+		}
+		return value;
 	}
 
 	/** Return the N50. */
@@ -203,7 +223,8 @@ class Histogram
 	{
 		for (Map::iterator it = m_map.begin(); it != m_map.end();) {
 			if (m_map.count(it->first - 1) == 0
-					&& m_map.count(it->first + 1) == 0)
+					&& m_map.count(it->first + 1) == 0
+					&& m_map.size() > 1)
 				m_map.erase(it++);
 			else
 				++it;
@@ -298,30 +319,87 @@ namespace std {
 static inline std::ostream& printContiguityStats(
 		std::ostream& out, const Histogram& h0,
 		unsigned minSize, bool printHeader = true,
-		const std::string& sep = "\t")
+		const std::string& sep = "\t",
+		const long long unsigned expSize = 0)
 {
 	Histogram h = h0.trimLow(minSize);
-	unsigned n50 = h.n50();
-	if (printHeader)
+	if (printHeader) {
 		out << "n" << sep
 			<< "n:" << minSize << sep
-			<< "n:N50" << sep
-			<< "min" << sep
+			<< "L50" << sep;
+		if (expSize > 0)
+			out << "LG50" << sep
+				<< "NG50" << sep;
+		out << "min" << sep
 			<< "N80" << sep
 			<< "N50" << sep
 			<< "N20" << sep
+			<< "E-size" << sep
 			<< "max" << sep
-			<< "sum\n";
-	return out
-		<< toEng(h0.size()) << sep
+			<< "sum" << sep
+			<< "name" << '\n';
+	}
+	unsigned n50 = h.n50();
+	out << toEng(h0.size()) << sep
 		<< toEng(h.size()) << sep
-		<< toEng(h.count(n50, INT_MAX)) << sep
+		<< toEng(h.count(n50, INT_MAX)) << sep;
+	long long unsigned sum = h.sum();
+	if (expSize > 0) {
+		unsigned ng50;
+		if (sum < expSize/2)
+			ng50 = h.minimum();
+		else
+			ng50 = h.argMin(sum - expSize/2);
+		out << toEng(h.count(ng50, INT_MAX)) << sep
+			<< toEng(ng50) << sep;
+	}
+	return out
 		<< toEng(h.minimum()) << sep
 		<< toEng(h.weightedPercentile(1 - 0.8)) << sep
 		<< toEng(n50) << sep
 		<< toEng(h.weightedPercentile(1 - 0.2)) << sep
+		<< toEng((unsigned)h.expectedValue()) << sep
 		<< toEng(h.maximum()) << sep
-		<< toEng(h.sum());
+		<< toEng(sum);
 }
 
+/** Pass assembly contiguity statistics -- values only. */
+static inline std::vector<int> passContiguityStatsVal(
+		const Histogram& h0, unsigned minSize, const long long unsigned expSize = 0)
+{
+#if _SQL
+	Histogram h = h0.trimLow(minSize);
+	unsigned n50 = h.n50();
+	long long unsigned sum = h.sum();
+
+	std::vector<int> vec = make_vector<int>()
+		<< h0.size()
+		<< h.size()
+		<< h.count(n50, INT_MAX)
+		<< h.minimum()
+		<< h.weightedPercentile(1 - 0.8)
+		<< n50
+		<< h.weightedPercentile(1 - 0.2)
+		<< (unsigned)h.expectedValue()
+		<< h.maximum()
+		<< sum;
+
+	if (expSize > 0) {
+		unsigned ng50;
+		if (sum < expSize/2)
+			ng50 = h.minimum();
+		else
+			ng50 = h.argMin(sum - expSize/2);
+		vec.push_back(h.count(ng50, INT_MAX));
+		vec.push_back(ng50);
+	}
+
+	return vec;
+#else
+	(void)h0;
+	(void)minSize;
+	(void)expSize;
+	return make_vector<int>();
+#endif
+}
 #endif

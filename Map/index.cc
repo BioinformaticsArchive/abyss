@@ -23,7 +23,7 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... FILE\n"
@@ -37,6 +37,9 @@ static const char USAGE_MESSAGE[] =
 "      --fa2bwt            build the BWT directly without the SA\n"
 "      --bwt2fm            build the FM index from the BWT\n"
 "  -a, --alphabet=STRING   use the alphabet STRING [-ACGT]\n"
+"      --alpha             equivalent to -a' ABCDEFGHIJKLMNOPQRSTUVWXYZ'\n"
+"      --dna               equivalent to -a'-ACGT'\n"
+"      --protein           equivalent to -a'#*ACDEFGHIKLMNPQRSTVWY'\n"
 "  -s, --sample=N          sample the suffix array [16]\n"
 "  -d, --decompress        decompress the index FILE\n"
 "  -c, --stdout            write output to standard output\n"
@@ -75,7 +78,8 @@ namespace opt {
 
 static const char shortopts[] = "a:cds:v";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION,
+	OPT_ALPHA, OPT_DNA, OPT_PROTEIN };
 
 static const struct option longopts[] = {
 	{ "both", no_argument, &opt::indexes, opt::BOTH },
@@ -84,6 +88,9 @@ static const struct option longopts[] = {
 	{ "fa2bwt", no_argument, &opt::fa2bwt, true },
 	{ "bwt2fm", no_argument, &opt::bwt2fm, true },
 	{ "alphabet", optional_argument, NULL, 'a' },
+	{ "alpha", optional_argument, NULL, OPT_ALPHA },
+	{ "dna", optional_argument, NULL, OPT_DNA },
+	{ "protein", optional_argument, NULL, OPT_PROTEIN },
 	{ "decompress", no_argument, NULL, 'd' },
 	{ "sample", required_argument, NULL, 's' },
 	{ "stdout", no_argument, NULL, 'c' },
@@ -172,8 +179,6 @@ static void buildFMIndex(FMIndex& fm, const string& path)
 
 int main(int argc, char **argv)
 {
-	checkPopcnt();
-
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -183,6 +188,15 @@ int main(int argc, char **argv)
 			case 'a':
 				opt::alphabet = arg.str();
 				arg.clear(ios::eofbit);
+				break;
+			case OPT_ALPHA:
+				opt::alphabet = " ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+				break;
+			case OPT_DNA:
+				opt::alphabet = "-ACGT";
+				break;
+			case OPT_PROTEIN:
+				opt::alphabet = "#*ACDEFGHIKLMNPQRSTVWY";
 				break;
 			case 'c': opt::toStdout = true; break;
 			case 'd': opt::decompress = true; break;

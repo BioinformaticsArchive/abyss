@@ -48,7 +48,10 @@ unsigned Kmer::getCode() const
 	/* At k=19, this hash function always returns an even number due
 	 * to the sequence and its reverse complement overlapping when the
 	 * xor is calculated. A more general solution is needed. */
-	const unsigned NUM_BYTES = s_length < 20 ? s_length/8 : 4;
+	const unsigned NUM_BYTES
+		= s_length < 8 ? 1
+		: s_length < 20 ? s_length/8
+		: 4;
 	Kmer rc = *this;
 	rc.reverseComplement();
 
@@ -291,6 +294,27 @@ void Kmer::reverseComplement()
 		m_seq[i] = swapBases[(uint8_t)m_seq[i]];
 }
 
+bool Kmer::isCanonical() const
+{
+	for (unsigned i = 0, j = s_length - 1;
+		i < s_length / 2 + s_length % 2; i++, j--) {
+		uint8_t base = getBaseCode(m_seq,
+			seqIndexToByteNumber(i), seqIndexToBaseIndex(i));
+		uint8_t rcBase = 0x3 & ~getBaseCode(m_seq,
+			seqIndexToByteNumber(j), seqIndexToBaseIndex(j));
+		if (base == rcBase)
+			continue;
+		return rcBase > base;
+	}
+	return true;
+}
+
+void Kmer::canonicalize()
+{
+	if (!isCanonical())
+		reverseComplement();
+}
+
 void Kmer::setLastBase(extDirection dir, uint8_t base)
 {
 	set(dir == SENSE ? s_length - 1 : 0, base);
@@ -401,11 +425,6 @@ void Kmer::set(unsigned i, uint8_t base)
 	assert(i < s_length);
 	setBaseCode(m_seq,
 			seqIndexToByteNumber(i), seqIndexToBaseIndex(i), base);
-}
-
-uint8_t Kmer::getLastBaseChar() const
-{
-	return codeToBase(at(s_length - 1));
 }
 
 // get a base code by the byte number and sub index

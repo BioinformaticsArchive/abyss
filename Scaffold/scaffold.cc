@@ -22,9 +22,9 @@
 #include <functional>
 #include <getopt.h>
 #include <iostream>
-#include <sstream>
-#include <string>
 #include <utility>
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
 using namespace std::rel_ops;
@@ -33,14 +33,16 @@ using boost::tie;
 
 #define PROGRAM "abyss-scaffold"
 
+DB db;
+
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... FASTA|OVERLAP DIST...\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... FASTA|OVERLAP DIST...\n"
 "Scaffold contigs using the distance estimate graph.\n"
 "\n"
 " Arguments:\n"
@@ -57,15 +59,27 @@ static const char USAGE_MESSAGE[] =
 "                        that maximizes the scaffold N50.\n"
 "  -k, --kmer=N          length of a k-mer\n"
 "      --min-gap=N       minimum scaffold gap length to output [50]\n"
+"      --max-gap=N       maximum scaffold gap length to output [inf]\n"
+"      --complex         remove complex transitive edges\n"
+"      --no-complex      don't remove complex transitive edges [default]\n"
+"      --SS              expect contigs to be oriented correctly\n"
+"      --no-SS           no assumption about contig orientation [default]\n"
 "  -o, --out=FILE        write the paths to FILE\n"
 "  -g, --graph=FILE      write the graph to FILE\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for sqlite\n"
+"      --strain=NAME     specify strain NAME for sqlite\n"
+"      --species=NAME    specify species NAME for sqlite\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
+
 	unsigned k; // used by ContigProperties
 
 	/** Minimum number of pairs. */
@@ -78,33 +92,54 @@ namespace opt {
 	/** Minimum scaffold gap length to output. */
 	static int minGap = 50;
 
+	/** Maximum scaffold gap length to output.
+	 * -ve value means no maximum. */
+	static int maxGap = -1;
+
 	/** Write the paths to this file. */
 	static string out;
 
 	/** Write the graph to this file. */
 	static string graphPath;
 
+	/** Run a strand-specific RNA-Seq assembly. */
+	static int ss;
+
 	/** Verbose output. */
 	int verbose; // used by PopBubbles
 
 	/** Output format */
 	int format = DOT; // used by DistanceEst
+
+	/** Remove complex transitive edges */
+	static int comp_trans;
 }
 
 static const char shortopts[] = "g:k:n:o:s:v";
 
-enum { OPT_HELP = 1, OPT_VERSION, OPT_MIN_GAP };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_MIN_GAP, OPT_MAX_GAP, OPT_COMP,
+	OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION, OPT_MIN_GAP, OPT_MAX_GAP, OPT_COMP };
 
 static const struct option longopts[] = {
 	{ "graph",       no_argument,       NULL, 'g' },
 	{ "kmer",        required_argument, NULL, 'k' },
 	{ "min-gap",     required_argument, NULL, OPT_MIN_GAP },
+	{ "max-gap",     required_argument, NULL, OPT_MAX_GAP },
 	{ "npairs",      required_argument, NULL, 'n' },
 	{ "out",         required_argument, NULL, 'o' },
 	{ "seed-length", required_argument, NULL, 's' },
+	{ "complex",     no_argument, &opt::comp_trans, 1 },
+	{ "no-complex",  no_argument, &opt::comp_trans, 0 },
+	{ "SS",          no_argument,       &opt::ss, 1 },
+	{ "no-SS",       no_argument,       &opt::ss, 0 },
 	{ "verbose",     no_argument,       NULL, 'v' },
 	{ "help",        no_argument,       NULL, OPT_HELP },
 	{ "version",     no_argument,       NULL, OPT_VERSION },
+	{ "db",          required_argument, NULL, OPT_DB },
+	{ "library",     required_argument, NULL, OPT_LIBRARY },
+	{ "strain",      required_argument, NULL, OPT_STRAIN },
+	{ "species",     required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -142,8 +177,6 @@ struct PoorSupport {
 static void filterGraph(Graph& g, unsigned minContigLength)
 {
 	typedef graph_traits<Graph> GTraits;
-	typedef GTraits::edge_descriptor E;
-	typedef GTraits::edge_iterator Eit;
 	typedef GTraits::vertex_descriptor V;
 	typedef GTraits::vertex_iterator Vit;
 
@@ -168,6 +201,10 @@ static void filterGraph(Graph& g, unsigned minContigLength)
 	unsigned numRemovedE = numBefore - num_edges(g);
 	if (opt::verbose > 0)
 		cerr << "Removed " << numRemovedE << " edges.\n";
+	if (!opt::db.empty()) {
+		addToDb(db, "V_removed", numRemovedV);
+		addToDb(db, "E_removed", numRemovedE);
+	}
 }
 
 /** Return true if the specified edge is a cycle. */
@@ -197,6 +234,9 @@ static void removeCycles(Graph& g)
 		cerr << "Removed " << cycles.size() << " cyclic edges.\n";
 		printGraphStats(cerr, g);
 	}
+
+	if (!opt::db.empty())
+		addToDb(db, "E_removed_cyclic", cycles.size());
 }
 
 /** Find edges in g0 that resolve forks in g.
@@ -250,6 +290,8 @@ static void resolveForks(Graph& g, const Graph& g0)
 	if (opt::verbose > 0)
 		cerr << "Added " << numEdges
 			<< " edges to ambiguous vertices.\n";
+	if (!opt::db.empty())
+		addToDb(db, "E_added_ambig", numEdges);
 }
 
 /** Remove tips.
@@ -258,8 +300,6 @@ static void resolveForks(Graph& g, const Graph& g0)
  */
 static void pruneTips(Graph& g)
 {
-	typedef graph_traits<Graph>::vertex_descriptor V;
-
 	/** Identify the tips. */
 	size_t n = 0;
 	pruneTips(g, CountingOutputIterator(n));
@@ -268,6 +308,9 @@ static void pruneTips(Graph& g)
 		cerr << "Removed " << n << " tips.\n";
 		printGraphStats(cerr, g);
 	}
+
+	if (!opt::db.empty())
+		addToDb(db, "Tips_removed", n);
 }
 
 /** Remove repetitive vertices from this graph.
@@ -343,6 +386,10 @@ static void removeRepeats(Graph& g)
 			<< "Removed "
 			<< numRemoved << " ambiguous vertices.\n";
 		printGraphStats(cerr, g);
+	}
+	if (!opt::db.empty()) {
+		addToDb(db, "V_cleared_ambg", repeats.size());
+		addToDb(db, "V_removed_ambg", numRemoved);
 	}
 }
 
@@ -423,6 +470,23 @@ static void removeWeakEdges(Graph& g)
 		cerr << "Removed " << weak.size() << " weak edges.\n";
 		printGraphStats(cerr, g);
 	}
+	if (!opt::db.empty())
+		addToDb(db, "E_removed_weak", weak.size());
+}
+
+static void removeLongEdges(Graph& g)
+{
+	typedef graph_traits<Graph>::edge_descriptor E;
+	typedef graph_traits<Graph>::edge_iterator Eit;
+
+	vector<E> long_e;
+	Eit eit, elast;
+	for (tie(eit, elast) = edges(g); eit != elast; ++eit) {
+		E e = *eit;
+		if (g[e].distance > opt::maxGap)
+			long_e.push_back(e);
+	}
+	remove_edges(g, long_e.begin(), long_e.end());
 }
 
 /** Return whether the specified distance estimate is an exact
@@ -484,6 +548,21 @@ static void readGraph(const string& path, Graph& g)
 	assert(in.eof());
 	if (opt::verbose > 0)
 		printGraphStats(cerr, g);
+
+	vector<int> vals = passGraphStatsVal(g);
+	vector<string> keys = make_vector<string>()
+		<< "V_readGraph"
+		<< "E_readGraph"
+		<< "degree0_readGraph"
+		<< "degree1_readGraph"
+		<< "degree234_readGraph"
+		<< "degree5_readGraph"
+		<< "max_readGraph";
+
+	if (!opt::db.empty()) {
+		for(unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
 	g_contigNames.lock();
 }
 
@@ -538,6 +617,30 @@ static Histogram buildScaffoldLengthHistogram(
 	return h;
 }
 
+/** Add contiguity stats to database */
+static void addCntgStatsToDb(
+		const Histogram h, const unsigned min)
+{
+	vector<int> vals = passContiguityStatsVal(h, min);
+	vector<string> keys = make_vector<string>()
+		<< "n"
+		<< "n200"
+		<< "nN50"
+		<< "min"
+		<< "N80"
+		<< "N50"
+		<< "N20"
+		<< "Esize"
+		<< "max"
+		<< "sum"
+		<< "nNG50"
+		<< "NG50";
+	if (!opt::db.empty()) {
+		for(unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
+}
+
 /** Build scaffold paths.
  * @param output write the results
  * @return the scaffold N50
@@ -565,11 +668,19 @@ unsigned scaffold(const Graph& g0, unsigned minContigLength,
 	removeRepeats(g);
 
 	// Remove transitive edges.
-	unsigned numTransitive = remove_transitive_edges(g);
+	unsigned numTransitive;
+	if (opt::comp_trans)
+		numTransitive = remove_complex_transitive_edges(g);
+	else
+		numTransitive = remove_transitive_edges(g);
+
 	if (opt::verbose > 0) {
 		cerr << "Removed " << numTransitive << " transitive edges.\n";
 		printGraphStats(cerr, g);
 	}
+
+	if (!opt::db.empty())
+		addToDb(db, "Edges_transitive", numTransitive);
 
 	// Prune tips.
 	pruneTips(g);
@@ -582,6 +693,10 @@ unsigned scaffold(const Graph& g0, unsigned minContigLength,
 			<< " vertices in bubbles.\n";
 		printGraphStats(cerr, g);
 	}
+
+	if (!opt::db.empty())
+		addToDb(db, "Vertices_bubblePopped", popped.size());
+
 	if (opt::verbose > 1) {
 		cerr << "Popped:";
 		for (vector<V>::const_iterator it = popped.begin();
@@ -593,18 +708,27 @@ unsigned scaffold(const Graph& g0, unsigned minContigLength,
 	// Remove weak edges.
 	removeWeakEdges(g);
 
+	// Remove any edges longer than opt::maxGap.
+	if (opt::maxGap >= 0)
+		removeLongEdges(g);
+
 	// Assemble the paths.
 	ContigPaths paths;
-	assembleDFS(g, back_inserter(paths));
+	assembleDFS(g, back_inserter(paths), opt::ss);
 	sort(paths.begin(), paths.end());
+	unsigned n = 0;
 	if (opt::verbose > 0) {
-		unsigned n = 0;
 		for (ContigPaths::const_iterator it = paths.begin();
 				it != paths.end(); ++it)
 			n += it->size();
 		cerr << "Assembled " << n << " contigs in "
 			<< paths.size() << " scaffolds.\n";
 		printGraphStats(cerr, g);
+	}
+
+	if (!opt::db.empty()) {
+		addToDb(db, "contigs_assembled", n);
+		addToDb(db, "scaffolds_assembled", paths.size());
 	}
 
 	const unsigned STATS_MIN_LENGTH = opt::minContigLength;
@@ -616,6 +740,7 @@ unsigned scaffold(const Graph& g0, unsigned minContigLength,
 			<< "\ts=" << minContigLength << '\n';
 		if (opt::verbose == 0)
 			printHeader = false;
+		addCntgStatsToDb(h, STATS_MIN_LENGTH);
 		return h.trimLow(STATS_MIN_LENGTH).n50();
 	}
 
@@ -641,12 +766,16 @@ unsigned scaffold(const Graph& g0, unsigned minContigLength,
 	// Print assembly contiguity statistics.
 	Histogram h = buildScaffoldLengthHistogram(g, paths);
 	printContiguityStats(cerr, h, STATS_MIN_LENGTH) << '\n';
+	addCntgStatsToDb(h, STATS_MIN_LENGTH);
 	return h.trimLow(STATS_MIN_LENGTH).n50();
 }
 
 /** Run abyss-scaffold. */
 int main(int argc, char** argv)
 {
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -682,12 +811,27 @@ int main(int argc, char** argv)
 		  case OPT_MIN_GAP:
 			arg >> opt::minGap;
 			break;
+		  case OPT_MAX_GAP:
+			arg >> opt::maxGap;
+			break;
 		  case OPT_HELP:
 			cout << USAGE_MESSAGE;
 			exit(EXIT_SUCCESS);
 		  case OPT_VERSION:
 			cout << VERSION_MESSAGE;
 			exit(EXIT_SUCCESS);
+		  case OPT_DB:
+			arg >> opt::db;
+			break;
+		  case OPT_LIBRARY:
+			arg >> opt::metaVars[0];
+			break;
+		  case OPT_STRAIN:
+			arg >> opt::metaVars[1];
+			break;
+		  case OPT_SPECIES:
+			arg >> opt::metaVars[2];
+			break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -711,6 +855,15 @@ int main(int argc, char** argv)
 			<< " --help' for more information.\n";
 		exit(EXIT_FAILURE);
 	}
+	if (!opt::db.empty()) {
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars);
+		addToDb(db, "K", opt::k);
+	}
 
 	Graph g;
 	if (optind < argc) {
@@ -726,13 +879,19 @@ int main(int argc, char** argv)
 		printGraphStats(cerr, g);
 	}
 
+	if (!opt::db.empty())
+		addToDb(db, "add_complement_edges", numAdded);
+
 	// Remove invalid edges.
 	unsigned numBefore = num_edges(g);
 	remove_edge_if(InvalidEdge(g), static_cast<DG&>(g));
 	unsigned numRemoved = numBefore - num_edges(g);
 	if (numRemoved > 0)
-		cerr << "waning: Removed "
+		cerr << "warning: Removed "
 			<< numRemoved << " invalid edges.\n";
+
+	if (!opt::db.empty())
+		addToDb(db, "Edges_invalid", numRemoved);
 
 	if (opt::minContigLengthEnd == 0) {
 		scaffold(g, opt::minContigLength, true);

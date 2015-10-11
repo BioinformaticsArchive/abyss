@@ -7,6 +7,7 @@
 #include "DistIO.h"
 #include "DotIO.h"
 #include "FastaIO.h"
+#include "GfaIO.h"
 #include "SAMIO.h"
 #include <cassert>
 #include <cstdlib> // for abort
@@ -30,6 +31,8 @@ std::ostream& write_graph(std::ostream& out, const Graph& g,
 		return write_dist(out, g);
 	  case DOT: case DOT_MEANCOV:
 		return out << dot_writer(g);
+	  case GFA:
+		return write_gfa(out, g);
 	  case SAM:
 		return write_sam(out, g, program, commandLine);
 	  default:
@@ -48,10 +51,26 @@ std::istream& read_graph(std::istream& in, ContigGraph<Graph>& g,
 	in >> std::ws;
 	assert(in);
 	switch (in.peek()) {
+	  case '@': // @SQ: SAM format
+		return read_sam_header(in, g);
 	  case 'd': // digraph: GraphViz dot format
 		return read_dot<Graph>(in, g, betterEP);
-	  case 'H': // HT: ASQG format
-		return read_asqg(in, g);
+	  case 'H': {
+		in.get();
+		char c = in.peek();
+		in.unget();
+		assert(in);
+		switch (c) {
+		  case 'T': // HT: ASQG format
+			return read_asqg(in, g);
+		  case '\t': // H: GAF format
+			return read_gfa(in, g);
+		  default:
+			std::cerr << "Unknown file format: `H" << c << "'\n";
+			exit(EXIT_FAILURE);
+		}
+		break;
+	  }
 	  case '>': // FASTA format for vertices
 		return read_fasta(in, g);
 	  default: // adj format

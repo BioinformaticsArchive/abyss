@@ -2,7 +2,9 @@
 #define SAM_H 1
 
 #include "config.h" // for SAM_SEQ_QUAL
+#include "IOUtil.h"
 #include "Alignment.h"
+#include "ContigID.h" // for g_contigNames
 #include <algorithm> // for swap
 #include <cstdlib> // for exit
 #include <iostream>
@@ -51,7 +53,11 @@ struct SAMAlignment {
 		FDUP = 1024,
 	};
 
-	SAMAlignment() { }
+	SAMAlignment() :
+		rname("*"),
+		pos(-1),
+		flag(FUNMAP),
+		mapq(0) { }
 
 	/** Consturct a single-end alignment. */
 	SAMAlignment(const Alignment& a) :
@@ -157,44 +163,34 @@ struct SAMAlignment {
 		std::istringstream in(cigar);
 		unsigned len;
 		char type;
-		in >> len >> type;
-		assert(in.good());
 		unsigned clip0 = 0;
-		switch (type) {
-			case 'H': case 'S':
-				clip0 = len;
-				in >> len >> type;
-				assert(in.good());
-				if (type != 'M') {
+		a.align_length = 0;
+		unsigned qlen = 0;
+		unsigned clip1 = 0;
+		while (in >> len >> type) {
+			switch (type) {
+			  case 'I': case 'X': case '=':
+				qlen += len;
+				clip1 += len;
+			  case 'D': case 'N': case 'P':
+				if (a.align_length == 0) {
 					// Ignore a malformatted CIGAR string whose first
 					// non-clipping operation is not M.
 					std::cerr << "warning: malformatted CIGAR: "
 						<< cigar << std::endl;
-					in >> len >> type;
-					assert(in.good());
 				}
-				assert(type == 'M');
-				a.align_length = len;
 				break;
-			case 'M':
-				a.align_length = len;
-				break;
-			default:
-				std::cerr << "error: invalid CIGAR: `"
-					<< cigar << "'\n";
-				exit(EXIT_FAILURE);
-		}
-
-		unsigned qlen = clip0 + a.align_length;
-		unsigned clip1 = 0;
-		while (in >> len >> type) {
-			switch (type) {
+			  case 'M':
+				if ((unsigned)a.align_length < len) {
+					clip0 += a.align_length + clip1;
+					a.align_length = len;
+					qlen += len;
+					clip1 = 0;
+					break;
+				}
 			  case 'H': case 'S':
-			  case 'I': case 'M': case 'X': case '=':
 				qlen += len;
 				clip1 += len;
-				break;
-			  case 'D': case 'N': case 'P':
 				break;
 			  default:
 				std::cerr << "error: invalid CIGAR: `"
@@ -204,7 +200,11 @@ struct SAMAlignment {
 		}
 		a.read_start_pos = isRC ? clip1 : clip0;
 		a.read_length = qlen;
-		assert(in.eof());
+		if (!in.eof()){
+			std::cerr << "error: invalid CIGAR: `"
+				<< cigar << "'\n";
+			exit(EXIT_FAILURE);
+		}
 		return a;
 	}
 
@@ -228,19 +228,20 @@ struct SAMRecord : SAMAlignment {
 #if SAM_SEQ_QUAL
 	std::string seq;
 	std::string qual;
+	std::string tags;
 #endif
 
-	SAMRecord() { }
-
 	/** Consturct a single-end alignment. */
-	explicit SAMRecord(const SAMAlignment& a,
+	explicit SAMRecord(const SAMAlignment& a = SAMAlignment(),
 			const std::string& qname = "*",
 #if SAM_SEQ_QUAL
 			const std::string& seq = "*",
-			const std::string& qual = "*"
+			const std::string& qual = "*",
+			const std::string& tags = ""
 #else
 			const std::string& /*seq*/ = "*",
-			const std::string& /*qual*/ = "*"
+			const std::string& /*qual*/ = "*",
+			const std::string& /*tags*/ = ""
 #endif
 			) :
 		SAMAlignment(a),
@@ -251,7 +252,8 @@ struct SAMRecord : SAMAlignment {
 #if SAM_SEQ_QUAL
 		,
 		seq(seq),
-		qual(qual)
+		qual(qual),
+		tags(tags)
 #endif
 	{
 	}
@@ -292,6 +294,8 @@ struct SAMRecord : SAMAlignment {
 		}
 	}
 
+	void noMate() { flag &= ~FPAIRED; }
+
 	/**
 	 * Return the position of the first base of the mate query on the
 	 * target extrapolated from the start of the alignment.
@@ -328,6 +332,8 @@ struct SAMRecord : SAMAlignment {
 			>> o.cigar >> o.mrnm >> o.mpos >> o.isize;
 #if SAM_SEQ_QUAL
 		in >> o.seq >> o.qual;
+		if (in.peek() != '\n')
+			in >> o.tags;
 #endif
 		in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 		if (!in)
@@ -363,6 +369,34 @@ static inline void fixMate(SAMRecord& a0, SAMRecord& a1)
 {
 	a0.fixMate(a1);
 	a1.fixMate(a0);
+}
+
+/** Read contig lengths from SAM headers. */
+static inline unsigned readContigLengths(std::istream& in, std::vector<unsigned>& lengths)
+{
+	assert(in);
+	assert(lengths.empty());
+	assert(g_contigNames.empty());
+	for (std::string line; in.peek() == '@' && getline(in, line);) {
+		std::istringstream ss(line);
+		std::string type;
+		ss >> type;
+		if (type != "@SQ")
+			continue;
+
+		std::string s;
+		unsigned len;
+		ss >> expect(" SN:") >> s >> expect(" LN:") >> len;
+		assert(ss);
+
+		put(g_contigNames, lengths.size(), s);
+		lengths.push_back(len);
+	}
+	if (lengths.empty()) {
+		std::cerr << "error: no @SQ records in the SAM header\n";
+		exit(EXIT_FAILURE);
+	}
+	return lengths.size();
 }
 
 #endif

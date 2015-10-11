@@ -14,26 +14,26 @@
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
-#include <iterator>
-#include <map>
 #include <pthread.h>
 #include <set>
-#include <sstream>
-#include <string>
 #include <vector>
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
 
 using namespace std;
 
 #define PROGRAM "SimpleGraph"
 
+DB db;
+
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Jared Simpson and Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... ADJ DIST\n"
+"Usage: " PROGRAM " -k<kmer> -o<out.path> [OPTION]... ADJ DIST\n"
 "Find paths through contigs using distance estimates.\n"
 "\n"
 " Arguments:\n"
@@ -56,10 +56,16 @@ static const char USAGE_MESSAGE[] =
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for sqlite\n"
+"      --strain=NAME     specify strain NAME for sqlite\n"
+"      --species=NAME    specify species NAME for sqlite\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k; // used by ContigProperties
 	static unsigned threads = 1;
 	static int extend;
@@ -76,7 +82,9 @@ namespace opt {
 
 static const char shortopts[] = "d:j:k:o:v";
 
-enum { OPT_HELP = 1, OPT_VERSION, OPT_MAX_COST };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_MAX_COST,
+	OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION, OPT_MAX_COST };
 
 static const struct option longopts[] = {
 	{ "kmer",        required_argument, NULL, 'k' },
@@ -87,18 +95,26 @@ static const struct option longopts[] = {
 	{ "no-extend",   no_argument,       &opt::extend, 0 },
 	{ "scaffold",    no_argument,       &opt::scaffold, 1 },
 	{ "no-scaffold", no_argument,       &opt::scaffold, 0 },
-	{ "threads",     required_argument,	NULL, 'j' },
+	{ "threads",     required_argument, NULL, 'j' },
 	{ "verbose",     no_argument,       NULL, 'v' },
 	{ "help",        no_argument,       NULL, OPT_HELP },
 	{ "version",     no_argument,       NULL, OPT_VERSION },
+	{ "db",          required_argument, NULL, OPT_DB },
+	{ "library",     required_argument, NULL, OPT_LIBRARY },
+	{ "strain",      required_argument, NULL, OPT_STRAIN },
+	{ "species",     required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
+typedef ContigGraph<DirectedGraph<ContigProperties, Distance> > Graph;
 static void generatePathsThroughEstimates(const Graph& g,
 		const string& estPath);
 
 int main(int argc, char** argv)
 {
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -117,6 +133,17 @@ int main(int argc, char** argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db;
+				break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0];
+				break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1];
+				break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -149,6 +176,14 @@ int main(int argc, char** argv)
 		exit(EXIT_FAILURE);
 	}
 
+	if (!opt::db.empty())
+		init(db,
+				opt::db,
+				opt::verbose,
+				PROGRAM,
+				opt::getCommand(argc, argv),
+				opt::metaVars);
+
 	string adjFile(argv[optind++]);
 	string estFile(argv[optind++]);
 
@@ -163,6 +198,11 @@ int main(int argc, char** argv)
 
 	if (opt::verbose > 0)
 		printGraphStats(cout, g);
+	if (!opt::db.empty()) {
+		addToDb(db, "K", opt::k);
+		addToDb(db, "V", (num_vertices(g) - num_vertices_removed(g)));
+		addToDb(db, "E", num_edges(g));
+	}
 
 	// try to find paths that match the distance estimates
 	generatePathsThroughEstimates(g, estFile);
@@ -258,7 +298,7 @@ struct ComparePathLength
 		unsigned lenA = calculatePathLength(m_g, m_origin, a);
 		unsigned lenB = calculatePathLength(m_g, m_origin, b);
 		return lenA < lenB
-			|| lenA == lenB && a.size() < b.size();
+			|| (lenA == lenB && a.size() < b.size());
 	}
   private:
 	const Graph& m_g;
@@ -676,6 +716,26 @@ static void generatePathsThroughEstimates(const Graph& g,
 		"Too many solutions: " << stats.tooManySolutions << "\n"
 		"Too complex: " << stats.tooComplex << "\n";
 
+	vector<int> vals = make_vector<int>()
+		<< stats.totalAttempted
+		<< stats.uniqueEnd
+		<< stats.noPossiblePaths
+		<< stats.noValidPaths
+		<< stats.repeat
+		<< stats.multiEnd
+		<< stats.tooManySolutions
+		<< stats.tooComplex;
+
+	vector<string> keys = make_vector<string>()
+		<< "stat_attempted_path_total"
+		<< "stat_unique_path"
+		<< "stat_impossible_path"
+		<< "stat_no_valid_path"
+		<< "stat_repetitive"
+		<< "stat_multi_valid_path"
+		<< "stat_too_many"
+		<< "stat_too_complex";
+
 	inStream.close();
 	outStream.close();
 
@@ -689,5 +749,18 @@ static void generatePathsThroughEstimates(const Graph& g,
 			cout << "Consider increasing the number of pairs "
 				"threshold paramter, n, to " << g_minNumPairsUsed
 				<< ".\n";
+	}
+
+	vals += make_vector<int>()
+		<< g_minNumPairs
+		<< g_minNumPairsUsed;
+
+	keys += make_vector<string>()
+		<< "minPairNum_DistanceEst"
+		<< "minPairNum_UsedInPath";
+
+	if (!opt::db.empty()) {
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb (db, keys[i], vals[i]);
 	}
 }

@@ -1,6 +1,6 @@
-#include "FastaReader.h"
+#include "Common/IOUtil.h"
+#include "DataLayer/FastaReader.h"
 #include "DataLayer/Options.h"
-#include "IOUtil.h"
 #include <algorithm>
 #include <cassert>
 #include <cctype>
@@ -25,6 +25,9 @@ namespace opt {
 
 	/** quality offset, usually 33 or 64 */
 	int qualityOffset;
+
+	/** minimum quality for internal bases */
+	int internalQThreshold;
 }
 
 /** Output an error message. */
@@ -142,13 +145,14 @@ next_record:
 		string header;
 		getline(header);
 		istringstream headerStream(header);
-		headerStream >> recordType >> id >> ws;
-		std::getline(headerStream, comment);
 
 		// Ignore SAM headers.
-		if (id.length() == 2 && isupper(id[0]) && isupper(id[1])
-				&& comment.length() > 2 && comment[2] == ':')
+		if (header[0] == '@' && isalpha(header[1])
+				&& isalpha(header[2]) && header[3] == '\t')
 			goto next_record;
+
+		headerStream >> recordType >> id >> ws;
+		std::getline(headerStream, comment);
 
 		// Casava FASTQ format
 		if (comment.size() > 3
@@ -224,8 +228,12 @@ next_record:
 		if (opt::trimMasked && !colourSpace) {
 			// Removed masked (lower case) sequence at the beginning
 			// and end of the read.
-			size_t trimFront = s.find_first_not_of("acgtn");
-			size_t trimBack = s.find_last_not_of("acgtn") + 1;
+			size_t trimFront = 0;
+			while (trimFront <= s.length() && islower(s[trimFront]))
+				trimFront++;
+			size_t trimBack = s.length();
+			while (trimBack > 0 && islower(s[trimBack - 1]))
+				trimBack--;
 			s.erase(trimBack);
 			s.erase(0, trimFront);
 			if (!q.empty()) {
@@ -336,16 +344,15 @@ next_record:
 		q.erase(m_maxLength);
 	}
 
+	static const char ASCII[] =
+		" !\"#$%&'()*+,-./0123456789:;<=>?"
+		"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
+		"`abcdefghijklmnopqrstuvwxyz{|}~";
 	if (opt::qualityThreshold > 0 && !q.empty()) {
 		assert(s.length() == q.length());
-		static const char ASCII[] =
-			" !\"#$%&'()*+,-./0123456789:;<=>?"
-			"@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_"
-			"`abcdefghijklmnopqrstuvwxyz{|}~";
 		assert(qualityOffset > (unsigned)ASCII[0]);
 		const char* goodQual = ASCII + (qualityOffset - ASCII[0])
 			+ opt::qualityThreshold;
-
 		size_t trimFront = q.find_first_of(goodQual);
 		size_t trimBack = q.find_last_of(goodQual) + 1;
 		if (trimFront >= trimBack) {
@@ -358,6 +365,18 @@ next_record:
 			q.erase(trimBack);
 			q.erase(0, trimFront);
 		}
+	}
+
+	if (opt::internalQThreshold > 0 && !q.empty()) {
+		assert(s.length() == q.length());
+		assert(qualityOffset > (unsigned)ASCII[0]);
+		const char* internalGoodQual = ASCII
+			+ (qualityOffset - ASCII[0])
+			+ opt::internalQThreshold;
+		size_t i = 0;
+		while ((i = q.find_first_not_of(internalGoodQual, i))
+				!= string::npos)
+			s[i++] = 'N';
 	}
 
 	assert(qualityOffset >= 33);

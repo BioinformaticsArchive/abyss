@@ -1,8 +1,8 @@
 #ifndef FASTAREADER_H
 #define FASTAREADER_H 1
 
-#include "Sequence.h"
-#include "StringUtil.h" // for chomp
+#include "Common/Sequence.h"
+#include "Common/StringUtil.h" // for chomp
 #include <cassert>
 #include <cstdlib> // for exit
 #include <fstream>
@@ -45,8 +45,11 @@ class FastaReader {
 		/** Return whether this stream is at end-of-file. */
 		bool eof() const { return m_in.eof(); };
 
+		/** Return true if failbit or badbit of stream is set. */
+		bool fail() const { return m_in.fail(); };
+
 		/** Return whether this stream is good. */
-		operator void*() const { return m_in; }
+		operator const void*() const { return m_in ? this : NULL; }
 
 		/** Return the next character of this stream. */
 		int peek() { return m_in.peek(); }
@@ -132,6 +135,16 @@ struct FastaRecord
 	FastaRecord(const std::string& id, const std::string& comment,
 			const Sequence& seq)
 		: id(id), comment(comment), anchor(0), seq(seq) { }
+
+	operator Sequence() const { return seq; }
+
+	FastaRecord& operator=(const std::string& s)
+	{
+		seq = s;
+		return *this;
+	}
+
+	size_t size() const { return seq.size(); }
 
 	friend FastaReader& operator >>(FastaReader& in, FastaRecord& o)
 	{

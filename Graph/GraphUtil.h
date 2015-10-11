@@ -24,20 +24,11 @@ num_vertices_removed(const Graph& g)
 	return n;
 }
 
-/** Print statistics of the number of vertices and edges. */
+/** Print a histogram of the degree. */
 template <typename Graph>
-std::ostream& printGraphStats(std::ostream& out, const Graph& g)
+Histogram printHistogram(const Graph& g)
 {
-	using std::setprecision;
-	typedef typename graph_traits<Graph>::vertex_iterator
-		vertex_iterator;
-
-	unsigned v = num_vertices(g) - num_vertices_removed(g);
-	unsigned e = num_edges(g);
-	out << "V=" << v << " E=" << e
-		<< " E/V=" << setprecision(3) << (float)e / v << std::endl;
-
-	// Print a histogram of the degree.
+	typedef typename graph_traits<Graph>::vertex_iterator vertex_iterator;
 	Histogram h;
 	std::pair<vertex_iterator, vertex_iterator> vit = vertices(g);
 	for (vertex_iterator u = vit.first; u != vit.second; ++u) {
@@ -45,6 +36,20 @@ std::ostream& printGraphStats(std::ostream& out, const Graph& g)
 			continue;
 		h.insert(out_degree(*u, g));
 	}
+	return h;
+}
+
+/** Print statistics of the number of vertices and edges. */
+template <typename Graph>
+std::ostream& printGraphStats(std::ostream& out, const Graph& g)
+{
+	using std::setprecision;
+	unsigned v = num_vertices(g) - num_vertices_removed(g);
+	unsigned e = num_edges(g);
+	out << "V=" << v << " E=" << e
+		<< " E/V=" << setprecision(3) << (float)e / v << std::endl;
+
+	Histogram h = printHistogram(g);
 	unsigned n = h.size();
 	unsigned n0 = h.count(0), n1 = h.count(1), n234 = h.count(2, 4);
 	unsigned n5 = n - (n0 + n1 + n234);
@@ -58,4 +63,29 @@ std::ostream& printGraphStats(std::ostream& out, const Graph& g)
 		"max: " << h.maximum() << std::endl;
 }
 
+/** Pass graph statistics  -- values only . */
+template <typename Graph>
+std::vector<int> passGraphStatsVal(const Graph& g)
+{
+#if _SQL
+	Histogram h = printHistogram(g);
+	unsigned n = h.size(),
+			 n0 = h.count(0),
+			 n1 = h.count(1),
+			 n234 = h.count(2, 4),
+			 n5 = n - (n0 + n1 + n234);
+
+	return make_vector<int>()
+		<< num_vertices(g) - num_vertices_removed(g)
+		<< num_edges(g)
+		<< (int)round(100.0 * n0 / n)
+		<< (int)round(100.0 * n1 / n)
+		<< (int)round(100.0 * n234 / n)
+		<< (int)round(100.0 * n5 / n)
+		<< h.maximum();
+#else
+	(void)g;
+	return make_vector<int>();
+#endif
+}
 #endif

@@ -1,12 +1,12 @@
 #ifndef CONTIGGRAPHALGORITHMS_H
 #define CONTIGGRAPHALGORITHMS_H 1
 
-#include "Algorithms.h"
-#include "ContigGraph.h"
-#include "ContigNode.h"
-#include "Estimate.h" // for BetterDistanceEst
-#include "Functional.h"
-#include "Iterator.h"
+#include "Common/Algorithms.h"
+#include "Common/ContigNode.h"
+#include "Common/Estimate.h" // for BetterDistanceEst
+#include "Common/Functional.h"
+#include "Common/Iterator.h"
+#include "Graph/ContigGraph.h"
 #include <boost/graph/graph_traits.hpp>
 #include <algorithm>
 #include <cassert>
@@ -199,7 +199,6 @@ merge(Graph& g, It first, It last)
 template<typename Graph, typename OutIt, typename Predicate>
 OutIt assemble_if(Graph& g, OutIt out, Predicate pred0)
 {
-	typedef typename Graph::vertex_descriptor vertex_descriptor;
 	typedef typename Graph::vertex_iterator vertex_iterator;
 	// pred(e) = !isPalindrome(e) && pred0(e)
 	binary_compose<std::logical_and<bool>,
@@ -232,9 +231,33 @@ OutIt assemble(Graph& g, OutIt out)
 	return assemble_if(g, out, True<edge_descriptor>());
 }
 
+/** Return true if the edge e is +ve sense. */
+template<typename Graph>
+struct IsPositive : std::unary_function<
+		typename graph_traits<Graph>::edge_descriptor, bool>
+{
+	IsPositive(const Graph& g) : m_g(g) { }
+	bool operator()(
+			typename graph_traits<Graph>::edge_descriptor e) const
+	{
+		return !get(vertex_sense, m_g, source(e, m_g))
+			&& !get(vertex_sense, m_g, target(e, m_g));
+	}
+  private:
+	const Graph& m_g;
+};
+
+/** Assemble unambiguous paths in forward orientation only.
+ * Write the paths to out. */
+template<typename Graph, typename OutIt>
+OutIt assemble_stranded(Graph& g, OutIt out)
+{
+	return assemble_if(g, out, IsPositive<Graph>(g));
+}
+
 /** Remove tips.
  * For an edge (u,v), remove the vertex v if deg+(u) > 1,
- * deg-(v) = 1 and deg+(v) = 0, and p(v) is true.
+ * deg+(v) = 0, and p(v) is true.
  * Stores all removed vertices in result.
  */
 template <typename Graph, typename OutputIt, typename Pred>
@@ -255,7 +278,7 @@ OutputIt pruneTips_if(Graph& g, OutputIt result, Pred p)
 		for (Vit vit = vrange.first; vit != vrange.second; ++vit) {
 			V v = *vit;
 			//assert(v != u);
-			if (in_degree(v, g) == 1 && out_degree(v, g) == 0 && p(v))
+			if (out_degree(v, g) == 0 && p(v))
 				tips.push_back(v);
 		}
 	}
@@ -268,6 +291,21 @@ OutputIt pruneTips_if(Graph& g, OutputIt result, Pred p)
 	return result;
 }
 
+/** Return true if the vertex is a normal 1-in 0-out tip. */
+template<typename Graph>
+struct IsTip : std::unary_function<
+		typename graph_traits<Graph>::vertex_descriptor, bool>
+{
+	IsTip(const Graph& g) : m_g(g) { }
+	bool operator()(
+			typename graph_traits<Graph>::vertex_descriptor v) const
+	{
+		return in_degree(v, m_g) == 1;
+	}
+  private:
+	const Graph& m_g;
+};
+
 /** Remove tips.
  * For an edge (u,v), remove the vertex v if deg+(u) > 1
  * and deg-(v) = 1 and deg+(v) = 0.
@@ -276,8 +314,7 @@ OutputIt pruneTips_if(Graph& g, OutputIt result, Pred p)
 template <typename Graph, typename OutputIt>
 OutputIt pruneTips(Graph& g, OutputIt result)
 {
-	typedef typename graph_traits<Graph>::vertex_descriptor V;
-	return pruneTips_if(g, result, True<V>());
+	return pruneTips_if(g, result, IsTip<Graph>(g));
 }
 
 /** Remove islands.
@@ -325,7 +362,7 @@ size_t addComplementaryEdges(ContigGraph<DG>& g)
 		V vc = get(vertex_complement, g, v);
 		E f;
 		bool found;
-		tie(f, found) = edge(vc, uc, g);
+		boost::tie(f, found) = edge(vc, uc, g);
 		if (!found) {
 			add_edge(vc, uc, g[e], static_cast<DG&>(g));
 			numAdded++;

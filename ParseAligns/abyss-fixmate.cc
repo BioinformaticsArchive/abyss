@@ -5,6 +5,7 @@
 #include "StringUtil.h"
 #include "Uncompress.h"
 #include "UnorderedMap.h"
+#include "ContigID.h"
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
@@ -13,19 +14,22 @@
 #include <getopt.h>
 #include <iomanip>
 #include <iostream>
-#include <iterator>
-#include <sstream>
-#include <string>
+#include <boost/unordered_map.hpp>
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
+#include <math.h>
 
 using namespace std;
 
 #define PROGRAM "abyss-fixmate"
 
+DB db;
+
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... [FILE]...\n"
@@ -37,35 +41,58 @@ static const char USAGE_MESSAGE[] =
 "\n"
 "      --no-qname        set the qname to * [default]\n"
 "      --qname           do not alter the qname\n"
+"      --all             print all alignments\n"
+"      --diff            print alignments that align to different\n"
+"                        contigs [default]\n"
 "  -l, --min-align=N     the minimal alignment size [1]\n"
 "  -s, --same=SAME       write properly-paired reads to this file\n"
 "  -h, --hist=FILE       write the fragment size histogram to FILE\n"
+"  -c, --cov=FILE        write the physical coverage to FILE\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for sqlite\n"
+"      --strain=NAME     specify strain NAME for sqlite\n"
+"      --species=NAME    specify species NAME for sqlite\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	static string fragPath;
 	static string histPath;
+	static string covPath;
 	static int qname;
 	static int verbose;
+	static int print_all;
 }
 
-static const char shortopts[] = "h:l:s:v";
+// for sqlite params
+static vector<string> keys;
+static vector<int> vals;
 
-enum { OPT_HELP = 1, OPT_VERSION };
+static const char shortopts[] = "h:c:l:s:v";
+
+enum { OPT_HELP = 1, OPT_VERSION, OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
 
 static const struct option longopts[] = {
-	{ "qname",    no_argument,      &opt::qname, 1 },
-	{ "no-qname", no_argument,      &opt::qname, 0 },
+	{ "qname",     no_argument,       &opt::qname, 1 },
+	{ "no-qname",  no_argument,       &opt::qname, 0 },
+	{ "all",       no_argument,       &opt::print_all, 1 },
+	{ "diff",      no_argument,       &opt::print_all, 0 },
 	{ "min-align", required_argument, NULL, 'l' },
-	{ "hist",    required_argument, NULL, 'h' },
-	{ "same",    required_argument, NULL, 's' },
-	{ "verbose", no_argument,       NULL, 'v' },
-	{ "help",    no_argument,       NULL, OPT_HELP },
-	{ "version", no_argument,       NULL, OPT_VERSION },
+	{ "hist",      required_argument, NULL, 'h' },
+	{ "cov",       required_argument, NULL, 'c' },
+	{ "same",      required_argument, NULL, 's' },
+	{ "verbose",   no_argument,       NULL, 'v' },
+	{ "help",      no_argument,       NULL, OPT_HELP },
+	{ "version",   no_argument,       NULL, OPT_VERSION },
+	{ "db",        required_argument, NULL, OPT_DB },
+	{ "library",   required_argument, NULL, OPT_LIBRARY },
+	{ "strain",    required_argument, NULL, OPT_STRAIN },
+	{ "species",   required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -79,6 +106,19 @@ static struct {
 
 static ofstream g_fragFile;
 static Histogram g_histogram;
+static ofstream g_covFile;
+static vector< vector<int> > g_contigCov;
+
+static void incrementRange(SAMRecord& a)
+{
+	unsigned inx = get(g_contigNames, a.rname);
+	g_contigCov[inx][a.pos]++;
+	assert(a.isize >= 0);
+	unsigned end = a.pos + a.isize;
+	if (end >= g_contigCov[inx].size())
+		end = g_contigCov[inx].size() - 1;
+	g_contigCov[inx][end]--;
+}
 
 static void handlePair(SAMRecord& a0, SAMRecord& a1)
 {
@@ -106,13 +146,17 @@ static void handlePair(SAMRecord& a0, SAMRecord& a1)
 		stats.numDifferent++;
 		// Set the mapping quality of both reads to their minimum.
 		a0.mapq = a1.mapq = min(a0.mapq, a1.mapq);
-		if (!opt::histPath.empty())
+		if (!opt::print_all)
 			cout << a0 << '\n' << a1 << '\n';
 	} else if (a0.isReverse() == a1.isReverse()) {
 		// Same target, FF orientation.
 		stats.numFF++;
 	} else {
 		// Same target, FR or RF orientation.
+		if (!opt::covPath.empty()) {
+			SAMRecord a = a0.isize >= 0 ? a0 : a1;
+			incrementRange(a);
+		}
 		g_histogram.insert(a0.isReverse() ? a1.isize : a0.isize);
 		if (!opt::fragPath.empty()) {
 			g_fragFile << a0 << '\n' << a1 << '\n';
@@ -120,16 +164,16 @@ static void handlePair(SAMRecord& a0, SAMRecord& a1)
 		}
 	}
 
-	if (opt::histPath.empty()) {
+	if (opt::print_all) {
 		cout << a0 << '\n' << a1 << '\n';
 		assert(cout.good());
 	}
 }
 
 #if SAM_SEQ_QUAL
-typedef unordered_map<string, SAMRecord> Alignments;
+typedef boost::unordered_map<string, SAMRecord> Alignments;
 #else
-typedef unordered_map<string, SAMAlignment> Alignments;
+typedef boost::unordered_map<string, SAMAlignment> Alignments;
 #endif
 
 static void printProgress(const Alignments& map)
@@ -163,7 +207,14 @@ static void handleAlignment(SAMRecord& sam, Alignments& map)
 		SAMRecord a0(it.first->second, it.first->first);
 #endif
 		handlePair(a0, sam);
+
+#include <boost/version.hpp>
+#if BOOST_VERSION >= 104300
+		// erase() is slow on older compilers so we use quick_erase()
+		map.quick_erase(it.first);
+#else
 		map.erase(it.first);
+#endif
 	}
 	stats.alignments++;
 	printProgress(map);
@@ -180,6 +231,45 @@ static void assert_eof(istream& in)
 	exit(EXIT_FAILURE);
 }
 
+/** Print physical coverage in wiggle format. */
+static void printCov(string file)
+{
+	ofstream out(file.c_str());
+	for (unsigned i = 0; i < g_contigCov.size(); i++) {
+		out << "variableStep\tchrom=" << get(g_contigNames, i) << '\n';
+		int prev = g_contigCov[i][0];
+		if (prev != 0) out << "0\t" << prev << '\n';
+		for (unsigned j = 1; j < g_contigCov[i].size(); j++) {
+			prev += g_contigCov[i][j];
+			if (prev != 0) out << j << "\t" << prev << '\n';
+		}
+	}
+}
+
+void parseTag(string line) {
+	stringstream ss(line);
+	string tag;
+	char type[2];
+	string id;
+	char delim;
+	unsigned length;
+	ss >> tag;
+	if (tag != "@SQ")
+		return;
+	while (ss >> type[0] >> type[1] >> delim) {
+		assert(delim == ':');
+		if (type[0] == 'S' && type[1] == 'N')
+			ss >> id;
+		else if (type[0] == 'L' && type[1] == 'N')
+			ss >> length;
+	}
+
+	assert(length > 0);
+	assert(id.size() > 0);
+	put(g_contigNames, g_contigCov.size(), id);
+	g_contigCov.push_back(vector<int>(length));	
+}
+
 static void readAlignments(istream& in, Alignments* pMap)
 {
 	for (SAMRecord sam; in >> ws;) {
@@ -187,12 +277,18 @@ static void readAlignments(istream& in, Alignments* pMap)
 			string line;
 			getline(in, line);
 			assert(in);
+
+			if (!opt::covPath.empty())
+				parseTag(line);
+
 			cout << line << '\n';
 			if (!opt::fragPath.empty())
 				g_fragFile << line << '\n';
 		} else if (in >> sam)
 			handleAlignment(sam, *pMap);
 	}
+	if (!opt::covPath.empty())
+		printCov(opt::covPath);
 	assert_eof(in);
 }
 
@@ -216,20 +312,52 @@ static string percent(size_t x, size_t n)
 	return ss.str();
 }
 
-/** Print statistics of the specified histogram. */
-static void printHistogramStats(const Histogram& h)
+/** Print statistics of the specified histogram. h not passed by
+  * reference because we want to make a copy
+ **/
+static void printHistogramStats(Histogram h)
 {
+	unsigned n_orig = h.size();
+	h.eraseNegative();
+	h.removeNoise();
+	h.removeOutliers();
+	h = h.trimFraction(0.0001);
 	cerr << "Stats mean: " << setprecision(4) << h.mean() << " "
 		"median: " << setprecision(4) << h.median() << " "
 		"sd: " << setprecision(4) << h.sd() << " "
 		"n: " << h.size() << " "
 		"min: " << h.minimum() << " "
-		"max: " << h.maximum() << '\n'
+		"max: " << h.maximum() << " "
+		"ignored: " << n_orig - h.size() << '\n'
 		<< h.barplot() << endl;
+	if (!opt::db.empty()) {
+		vals = make_vector<int>()
+			<< (int)round(h.mean())
+			<< h.median()
+			<< (int)round(h.sd())
+			<< h.size()
+			<< h.minimum()
+			<< h.maximum()
+			<< n_orig-h.size();
+
+		keys = make_vector<string>()
+			<< "mean"
+			<< "median"
+			<< "sd"
+			<< "n"
+			<< "min"
+			<< "max"
+			<< "ignored";
+
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
 }
 
 int main(int argc, char* const* argv)
 {
+	opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -241,6 +369,7 @@ int main(int argc, char* const* argv)
 				break;
 			case 's': arg >> opt::fragPath; break;
 			case 'h': arg >> opt::histPath; break;
+			case 'c': arg >> opt::covPath; break;
 			case 'v': opt::verbose++; break;
 			case OPT_HELP:
 				cout << USAGE_MESSAGE;
@@ -248,6 +377,18 @@ int main(int argc, char* const* argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db;
+				break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0];
+				break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1];
+				break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2];
+				break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -267,6 +408,15 @@ int main(int argc, char* const* argv)
 		assert(g_fragFile.is_open());
 	}
 
+	if (!opt::db.empty())
+		init(db,
+			opt::db,
+			opt::verbose,
+			PROGRAM,
+			opt::getCommand(argc, argv),
+			opt::metaVars
+		);
+
 	Alignments alignments(1);
 	if (optind < argc) {
 		for_each(argv + optind, argv + argc,
@@ -278,9 +428,11 @@ int main(int argc, char* const* argv)
 	}
 	if (opt::verbose > 0)
 		cerr << "Read " << stats.alignments << " alignments" << endl;
+	if (!opt::db.empty())
+		addToDb(db, "read_alignments_initial", stats.alignments);
 
 	// Print the unpaired alignments.
-	if (opt::histPath.empty()) {
+	if (opt::print_all) {
 		for (Alignments::iterator it = alignments.begin();
 				it != alignments.end(); it++) {
 #if SAM_SEQ_QUAL
@@ -288,6 +440,7 @@ int main(int argc, char* const* argv)
 #else
 			SAMRecord a0(it->second, it->first);
 #endif
+			a0.noMate();
 			cout << a0 << '\n';
 			assert(cout.good());
 		}
@@ -309,6 +462,38 @@ int main(int argc, char* const* argv)
 		"Different  " << percent(stats.numDifferent, sum) << "\n"
 		"Total      " << sum << endl;
 
+	if (!opt::db.empty()) {
+		vals = make_vector<int>()
+			<< alignments.size()
+			<< stats.bothUnaligned
+			<< stats.oneUnaligned
+			<< numFR
+			<< numRF
+			<< stats.numFF
+			<< stats.numDifferent
+			<< sum;
+
+		keys = make_vector<string>()
+			<< "Mateless"
+			<< "Unaligned"
+			<< "Singleton"
+			<< "FR"
+			<< "RF"
+			<< "FF"
+			<< "Different"
+			<< "Total";
+
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
+
+	if (alignments.size() == sum) {
+		cerr << PROGRAM ": error: All reads are mateless. This "
+			"can happen when first and second read IDs do not match."
+			<< endl;
+		exit(EXIT_FAILURE);
+	}
+
 	if (!opt::fragPath.empty())
 		g_fragFile.close();
 
@@ -325,28 +510,21 @@ int main(int argc, char* const* argv)
 
 		// Print the statistics of the forward-reverse distribution.
 		if ((float)numFR / numTotal > 0.001) {
-			Histogram h = g_histogram;
-			h.eraseNegative();
-			h.removeNoise();
-			h.removeOutliers();
 			cerr << "FR ";
-			printHistogramStats(h.trimFraction(0.0001));
+			printHistogramStats(g_histogram);
 		}
 
 		// Print the statistics of the reverse-forward distribution.
 		if ((float)numRF / numTotal > 0.001) {
-			Histogram h = g_histogram.negate();
-			h.eraseNegative();
-			h.removeNoise();
-			h.removeOutliers();
 			cerr << "RF ";
-			printHistogramStats(h.trimFraction(0.0001));
+			printHistogramStats(g_histogram.negate());
 		}
 	}
 
 	if (stats.numFF > numFR && stats.numFF > numRF) {
-		cerr << "error: The mate pairs of this library are oriented "
-			"forward-forward (FF), which is not supported by ABySS."
+		cerr << PROGRAM ": error: The mate pairs of this library are "
+			"oriented forward-forward (FF), which is not supported "
+			"by ABySS."
 			<< endl;
 		exit(EXIT_FAILURE);
 	}

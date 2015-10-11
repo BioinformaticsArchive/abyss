@@ -11,7 +11,7 @@ using boost::graph_traits;
  * deg-(u) = 0 and then visiting any remaining vertices.
  */
 template <class Graph, class Visitor, class ColorMap>
-void depthFirstSearch(const Graph& g, Visitor vis, ColorMap color)
+void depthFirstSearch(const Graph& g, Visitor vis, ColorMap color, bool ss = false)
 {
 	using boost::color_traits;
 	using boost::property_traits;
@@ -39,6 +39,10 @@ void depthFirstSearch(const Graph& g, Visitor vis, ColorMap color)
 			boost::detail::depth_first_visit_impl(g, u, vis, color,
 					boost::detail::nontruth2());
 		}
+		if (ss) {
+			++uit;
+			assert(uit != ulast);
+		}
 	}
 
 	// Visit vertices where discontiguous-(u).
@@ -48,6 +52,10 @@ void depthFirstSearch(const Graph& g, Visitor vis, ColorMap color)
 			vis.start_vertex(u, g);
 			boost::detail::depth_first_visit_impl(g, u, vis, color,
 					boost::detail::nontruth2());
+		}
+		if (ss) {
+			++uit;
+			assert(uit != ulast);
 		}
 	}
 

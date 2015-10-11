@@ -1,4 +1,5 @@
 #include "Common/Options.h"
+#include "Common/Sequence.h"
 #include "DataLayer/Options.h"
 #include "ContigNode.h"
 #include "ContigProperties.h"
@@ -18,23 +19,29 @@
 #include <cstdlib>
 #include <getopt.h>
 #include <iostream>
-#include <iterator>
 #include <set>
-#include <sstream>
 #include <vector>
+
+#include "DataBase/Options.h"
+#include "DataBase/DB.h"
+
+#if PAIRED_DBG
+#include "PairedDBG/KmerPair.h"
+#endif
 
 using namespace std;
 
 #define PROGRAM "AdjList"
 
+DB db;
 static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... [FILE]...\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... [FILE]...\n"
 "Find overlaps of [m,k) bases. Contigs may be read from FILE(s)\n"
 "or standard input. Output is written to standard output.\n"
 "Overlaps of exactly k-1 bases are found using a hash table.\n"
@@ -42,38 +49,69 @@ static const char USAGE_MESSAGE[] =
 "\n"
 " Options:\n"
 "\n"
-"  -k, --kmer=K          find overlaps of up to K-1 bases\n"
+"  -k, --kmer=N          the length of a k-mer (when -K is not set)\n"
+"                        or the span of a k-mer pair (when -K is set)\n"
+"  -K, --single-kmer=N   the length of a single k-mer in a k-mer pair\n"
 "  -m, --min-overlap=M   require a minimum overlap of M bases [50]\n"
-"      --adj             output the results in adj format [default]\n"
-"      --dot             output the results in dot format\n"
-"      --sam             output the results in SAM format\n"
+"      --adj             output the graph in ADJ format [default]\n"
+"      --asqg            output the graph in ASQG format\n"
+"      --dot             output the graph in GraphViz format\n"
+"      --gv              output the graph in GraphViz format\n"
+"      --gfa             output the graph in GFA format\n"
+"      --sam             output the graph in SAM format\n"
+"      --SS              expect contigs to be oriented correctly\n"
+"      --no-SS           no assumption about contig orientation\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
 "      --version         output version information and exit\n"
+"      --db=FILE         specify path of database repository in FILE\n"
+"      --library=NAME    specify library NAME for database\n"
+"      --strain=NAME     specify strain NAME for database\n"
+"      --species=NAME    specify species NAME for database\n"
 "\n"
 "Report bugs to <" PACKAGE_BUGREPORT ">.\n";
 
 namespace opt {
+	string db;
+	dbVars metaVars;
 	unsigned k; // used by GraphIO
+
+	/** Length of a single-kmer in a kmer pair */
+	unsigned singleKmerSize = 0;
+
 	int format; // used by GraphIO
+
+	/** Run a strand-specific RNA-Seq assembly. */
+	static int ss;
 
 	/** The minimum required amount of overlap. */
 	static unsigned minOverlap = 50;
 }
 
-static const char shortopts[] = "k:m:v";
+static const char shortopts[] = "k:K:m:v";
 
-enum { OPT_HELP = 1, OPT_VERSION };
+enum { OPT_HELP = 1, OPT_VERSION, OPT_DB, OPT_LIBRARY, OPT_STRAIN, OPT_SPECIES };
+//enum { OPT_HELP = 1, OPT_VERSION };
 
 static const struct option longopts[] = {
 	{ "kmer",    required_argument, NULL, 'k' },
+	{ "single-kmer", required_argument, NULL, 'K' },
 	{ "min-overlap", required_argument, NULL, 'm' },
 	{ "adj",     no_argument,       &opt::format, ADJ },
+	{ "asqg",    no_argument,       &opt::format, ASQG },
 	{ "dot",     no_argument,       &opt::format, DOT },
+	{ "gv",      no_argument,       &opt::format, DOT },
+	{ "gfa",     no_argument,       &opt::format, GFA },
 	{ "sam",     no_argument,       &opt::format, SAM },
+	{ "SS",      no_argument,       &opt::ss, 1 },
+	{ "no-SS",   no_argument,       &opt::ss, 0 },
 	{ "verbose", no_argument,       NULL, 'v' },
 	{ "help",    no_argument,       NULL, OPT_HELP },
 	{ "version", no_argument,       NULL, OPT_VERSION },
+	{ "db",      required_argument, NULL, OPT_DB },
+	{ "library", required_argument, NULL, OPT_LIBRARY },
+	{ "strain",  required_argument, NULL, OPT_STRAIN },
+	{ "species", required_argument, NULL, OPT_SPECIES },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -102,6 +140,8 @@ static void addOverlapsSA(Graph& g, const SuffixArray& sa,
 		pair<It, It> range = sa.equal_range(q);
 		for (It it = range.first; it != range.second; ++it) {
 			ContigNode u(it->second);
+			if (opt::ss && u.sense() != v.sense())
+				continue;
 			if (seen.insert(u).second) {
 				// Add the longest overlap between two vertices.
 				unsigned overlap = it->first.size();
@@ -118,7 +158,6 @@ static void addOverlapsSA(Graph& g, const vector<Kmer>& prefixes)
 	typedef pair<string, ContigNode> Suffix;
 	typedef vector<Suffix> Suffixes;
 	Suffixes suffixes;
-	SuffixArray sa(opt::minOverlap);
 
 	typedef graph_traits<Graph>::vertex_descriptor V;
 	typedef graph_traits<Graph>::vertex_iterator Vit;
@@ -132,8 +171,12 @@ static void addOverlapsSA(Graph& g, const vector<Kmer>& prefixes)
 		assert(uci < prefixes.size());
 		string suffix(reverseComplement(prefixes[uci]).str());
 		suffixes.push_back(Suffix(suffix, u));
-		sa.insert(suffixes.back());
 	}
+
+	SuffixArray sa(opt::minOverlap);
+	for (Suffixes::const_iterator it = suffixes.begin();
+			it != suffixes.end(); ++it)
+		sa.insert(*it);
 	sa.construct();
 
 	for (Suffixes::const_iterator it = suffixes.begin();
@@ -143,14 +186,13 @@ static void addOverlapsSA(Graph& g, const vector<Kmer>& prefixes)
 	}
 }
 
-/** An index of suffixes of k-1 bp. */
-typedef unordered_map<Kmer, vector<ContigNode>, hashKmer> SuffixMap;
-
 /** Read contigs. Add contig properties to the graph. Add prefixes to
  * the collection and add suffixes to their index.
  */
+template <class KmerType>
 static void readContigs(const string& path,
-		Graph& g, vector<Kmer>& prefixes, SuffixMap& suffixMap)
+		Graph& g, vector<KmerType>& prefixes,
+		unordered_map<KmerType, vector<ContigNode> >& suffixMap)
 {
 	if (opt::verbose > 0)
 		cerr << "Reading `" << path << "'...\n";
@@ -158,7 +200,7 @@ static void readContigs(const string& path,
 	unsigned count = 0;
 	FastaReader in(path.c_str(), FastaReader::FOLD_CASE);
 	for (FastaRecord rec; in >> rec;) {
-		const Sequence& seq = rec.seq;
+		Sequence& seq = rec.seq;
 		if (count++ == 0) {
 			// Detect colour-space contigs.
 			opt::colourSpace = isdigit(seq[0]);
@@ -169,11 +211,13 @@ static void readContigs(const string& path,
 				assert(isalpha(seq[0]));
 		}
 
+		flattenAmbiguityCodes(seq);
+
 		// Add the prefix to the collection.
 		unsigned overlap = opt::k - 1;
 		assert(seq.length() > overlap);
-		Kmer prefix(seq.substr(0, overlap));
-		Kmer suffix(seq.substr(seq.length() - overlap));
+		KmerType prefix(seq.substr(0, overlap));
+		KmerType suffix(seq.substr(seq.length() - overlap));
 		prefixes.push_back(prefix);
 		prefixes.push_back(reverseComplement(suffix));
 
@@ -188,6 +232,89 @@ static void readContigs(const string& path,
 	assert(in.eof());
 }
 
+/** Build contig overlap graph. */
+template <class KmerType>
+static void buildOverlapGraph(Graph& g, vector<KmerType>& prefixes,
+	unordered_map<KmerType, vector<ContigNode> >& suffixMap)
+{
+	// Add the overlap edges of exactly k-1 bp.
+
+	typedef graph_traits<Graph>::vertex_descriptor V;
+	typedef unordered_map<KmerType, vector<ContigNode> > SuffixMap;
+	typedef typename vector<KmerType>::const_iterator PrefixIterator;
+	typedef const typename SuffixMap::mapped_type Edges;
+	typedef typename SuffixMap::mapped_type::const_iterator SuffixIterator;
+
+	if (opt::verbose > 0)
+		cerr << "Finding overlaps of exactly k-1 bp...\n";
+	for (PrefixIterator it = prefixes.begin(); it != prefixes.end(); ++it) {
+		ContigNode v(it - prefixes.begin());
+		Edges& edges = suffixMap[*it];
+		for (SuffixIterator itu = edges.begin(); itu != edges.end(); ++itu) {
+			V uc = get(vertex_complement, g, *itu);
+			V vc = get(vertex_complement, g, v);
+			if (opt::ss && uc.sense() != vc.sense())
+				continue;
+			add_edge(vc, uc, -(int)opt::k + 1, static_cast<DG&>(g));
+		}
+	}
+	SuffixMap().swap(suffixMap);
+
+	if (opt::verbose > 0)
+		printGraphStats(cerr, g);
+}
+
+template <class KmerType>
+void loadDataStructures(Graph& g, vector<KmerType>& prefixes,
+	unordered_map<KmerType, vector<ContigNode> >& suffixMap,
+	int argc, char** argv)
+{
+	if (optind < argc) {
+		for (; optind < argc; optind++)
+			readContigs(argv[optind], g, prefixes, suffixMap);
+	} else
+		readContigs("-", g, prefixes, suffixMap);
+	g_contigNames.lock();
+}
+
+/** Build contig overlap graph for standard de Bruijn graph */
+void buildOverlapGraph(Graph& g, int argc, char** argv)
+{
+	Kmer::setLength(opt::k - 1);
+
+	vector<Kmer> prefixes;
+	unordered_map<Kmer, vector<ContigNode> >
+		suffixMap(prefixes.size());
+
+	loadDataStructures(g, prefixes, suffixMap, argc, argv);
+	buildOverlapGraph(g, prefixes, suffixMap);
+
+	if (opt::minOverlap < opt::k - 1) {
+		// Add the overlap edges of fewer than k-1 bp.
+		if (opt::verbose > 0)
+			cerr << "Finding overlaps of fewer than k-1 bp...\n";
+		addOverlapsSA(g, prefixes);
+		if (opt::verbose > 0)
+			printGraphStats(cerr, g);
+	}
+}
+
+#if PAIRED_DBG
+/** Build contig overlap graph for paired de Bruijn graph */
+void buildPairedOverlapGraph(Graph& g, int argc, char** argv)
+{
+	Kmer::setLength(opt::singleKmerSize - 1);
+	KmerPair::setLength(opt::k - 1);
+
+	vector<KmerPair> prefixes;
+	unordered_map<KmerPair, vector<ContigNode> >
+		suffixMap(prefixes.size());
+
+	loadDataStructures(g, prefixes, suffixMap, argc, argv);
+	buildOverlapGraph(g, prefixes, suffixMap);
+}
+#endif
+
 int main(int argc, char** argv)
 {
 	string commandLine;
@@ -199,6 +326,9 @@ int main(int argc, char** argv)
 		commandLine = ss.str();
 	}
 
+	if (!opt::db.empty())
+		opt::metaVars.resize(3);
+
 	bool die = false;
 	for (int c; (c = getopt_long(argc, argv,
 					shortopts, longopts, NULL)) != -1;) {
@@ -206,6 +336,7 @@ int main(int argc, char** argv)
 		switch (c) {
 			case '?': die = true; break;
 			case 'k': arg >> opt::k; break;
+			case 'K': arg >> opt::singleKmerSize; break;
 			case 'm': arg >> opt::minOverlap; break;
 			case 'v': opt::verbose++; break;
 			case OPT_HELP:
@@ -214,6 +345,14 @@ int main(int argc, char** argv)
 			case OPT_VERSION:
 				cout << VERSION_MESSAGE;
 				exit(EXIT_SUCCESS);
+			case OPT_DB:
+				arg >> opt::db; break;
+			case OPT_LIBRARY:
+				arg >> opt::metaVars[0]; break;
+			case OPT_STRAIN:
+				arg >> opt::metaVars[1]; break;
+			case OPT_SPECIES:
+				arg >> opt::metaVars[2]; break;
 		}
 		if (optarg != NULL && !arg.eof()) {
 			cerr << PROGRAM ": invalid option: `-"
@@ -237,50 +376,45 @@ int main(int argc, char** argv)
 		opt::minOverlap = opt::k - 1;
 	opt::minOverlap = min(opt::minOverlap, opt::k - 1);
 
+	if (!opt::db.empty())
+		init (db, opt::db, opt::verbose, PROGRAM, opt::getCommand(argc, argv), opt::metaVars);
 	opt::trimMasked = false;
-	Kmer::setLength(opt::k - 1);
+
+	// contig overlap graph
 	Graph g;
-	vector<Kmer> prefixes;
-	SuffixMap suffixMap(prefixes.size());
-	if (optind < argc) {
-		for (; optind < argc; optind++)
-			readContigs(argv[optind], g, prefixes, suffixMap);
-	} else
-		readContigs("-", g, prefixes, suffixMap);
-	g_contigNames.lock();
 
-	// Add the overlap edges of exactly k-1 bp.
-	typedef graph_traits<Graph>::vertex_descriptor V;
-	if (opt::verbose > 0)
-		cerr << "Finding overlaps of exactly k-1 bp...\n";
-	for (vector<Kmer>::const_iterator it = prefixes.begin();
-			it != prefixes.end(); ++it) {
-		ContigNode v(it - prefixes.begin());
-		const SuffixMap::mapped_type& edges = suffixMap[*it];
-		for (SuffixMap::mapped_type::const_iterator
-				itu = edges.begin(); itu != edges.end(); ++itu) {
-			V uc = get(vertex_complement, g, *itu);
-			V vc = get(vertex_complement, g, v);
-			add_edge(vc, uc, -(int)opt::k + 1, static_cast<DG&>(g));
-		}
-	}
-	SuffixMap().swap(suffixMap);
-
-	if (opt::verbose > 0)
-		printGraphStats(cerr, g);
-
-	if (opt::minOverlap < opt::k - 1) {
-		// Add the overlap edges of fewer than k-1 bp.
-		if (opt::verbose > 0)
-			cerr << "Finding overlaps of fewer than k-1 bp...\n";
-		addOverlapsSA(g, prefixes);
-		if (opt::verbose > 0)
-			printGraphStats(cerr, g);
-	}
+#if PAIRED_DBG
+	if (opt::singleKmerSize > 0)
+		buildPairedOverlapGraph(g, argc, argv);
+	else
+		buildOverlapGraph(g, argc, argv);
+#else
+	buildOverlapGraph(g, argc, argv);
+#endif
 
 	// Output the graph.
 	write_graph(cout, g, PROGRAM, commandLine);
 	assert(cout.good());
+	vector<int> vals = make_vector<int>()
+		<< opt::ss
+		<< opt::k;
+	vector<int> new_vals = passGraphStatsVal(g);
+	vals.insert(vals.end(), new_vals.begin(), new_vals.end());
+
+	vector<string> keys = make_vector<string>()
+		<< "SS"
+		<< "K"
+		<< "V"
+		<< "E"
+		<< "degree0pctg"
+		<< "degree1pctg"
+		<< "degree234pctg"
+		<< "degree5pctg"
+		<< "degree_max";
+	if (!opt::db.empty()) {
+		for (unsigned i=0; i<vals.size(); i++)
+			addToDb(db, keys[i], vals[i]);
+	}
 
 	return 0;
 }

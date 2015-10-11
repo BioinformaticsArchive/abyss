@@ -3,7 +3,6 @@
  * Written by Shaun Jackman <sjackman@bcgsc.ca>.
  */
 
-#include "dialign.h"
 #include "config.h"
 #include "Common/Options.h"
 #include "ConstString.h"
@@ -43,9 +42,6 @@
 using namespace std;
 using namespace boost::lambda;
 using boost::tie;
-#if !__GXX_EXPERIMENTAL_CXX0X__
-using boost::cref;
-#endif
 
 #define PROGRAM "PopBubbles"
 
@@ -53,10 +49,10 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
-"Usage: " PROGRAM " [OPTION]... FASTA ADJ\n"
+"Usage: " PROGRAM " -k<kmer> [OPTION]... FASTA ADJ\n"
 "Identify and pop simple bubbles.\n"
 "\n"
 " Arguments:\n"
@@ -76,8 +72,16 @@ static const char USAGE_MESSAGE[] =
 "      --scaffold        scaffold over bubbles that have\n"
 "                        insufficient identity\n"
 "      --no-scaffold     disable scaffolding [default]\n"
+"      --SS              expect contigs to be oriented correctly\n"
+"      --no-SS           no assumption about contig orientation [default]\n"
 "  -g, --graph=FILE      write the contig adjacency graph to FILE\n"
-"      --dot             output bubbles in dot format\n"
+"      --adj             output the graph in ADJ format [default]\n"
+"      --asqg            output the graph in ASQG format\n"
+"      --dot             output the graph in GraphViz format\n"
+"      --gv              output the graph in GraphViz format\n"
+"      --gfa             output the graph in GFA format\n"
+"      --sam             output the graph in SAM format\n"
+"      --bubble-graph    output a graph of the bubbles\n"
 "  -j, --threads=N       use N parallel threads [1]\n"
 "  -v, --verbose         display verbose output\n"
 "      --help            display this help and exit\n"
@@ -106,19 +110,19 @@ namespace opt {
 	/** Write the contig adjacency graph to this file. */
 	static string graphPath;
 
-	/** Output bubbles in dot format. */
-	static int dot;
+	/** Output a graph of the bubbles. */
+	static int bubbleGraph;
 
 	int format; // used by ContigProperties
 
+	/** Run a strand-specific RNA-Seq assembly. */
+	static int ss;
+
 	/** Number of threads. */
 	static int threads = 1;
-	static int dialign_debug;
-	static string dialign_score;
-	static string dialign_prob;
 }
 
-static const char shortopts[] = "a:b:c:g:j:k:p:vD:M:P:";
+static const char shortopts[] = "a:b:c:g:j:k:p:v";
 
 enum { OPT_HELP = 1, OPT_VERSION };
 
@@ -126,19 +130,24 @@ static const struct option longopts[] = {
 	{ "branches",      required_argument, NULL, 'a' },
 	{ "bubble-length", required_argument, NULL, 'b' },
 	{ "coverage",      required_argument, NULL, 'c' },
-	{ "dot",           no_argument,       &opt::dot, 1, },
+	{ "bubble-graph",  no_argument,       &opt::bubbleGraph, 1, },
 	{ "graph",         required_argument, NULL, 'g' },
+	{ "adj",           no_argument,       &opt::format, ADJ },
+	{ "asqg",          no_argument,       &opt::format, ASQG },
+	{ "dot",           no_argument,       &opt::format, DOT },
+	{ "gv",            no_argument,       &opt::format, DOT },
+	{ "gfa",           no_argument,       &opt::format, GFA },
+	{ "sam",           no_argument,       &opt::format, SAM },
 	{ "kmer",          required_argument, NULL, 'k' },
 	{ "identity",      required_argument, NULL, 'p' },
 	{ "scaffold",      no_argument,       &opt::scaffold, 1},
 	{ "no-scaffold",   no_argument,       &opt::scaffold, 0},
+	{ "SS",            no_argument,       &opt::ss, 1 },
+	{ "no-SS",         no_argument,       &opt::ss, 0 },
 	{ "threads",       required_argument, NULL, 'j' },
 	{ "verbose",       no_argument,       NULL, 'v' },
 	{ "help",          no_argument,       NULL, OPT_HELP },
 	{ "version",       no_argument,       NULL, OPT_VERSION },
-	{ "dialign-d",   required_argument, NULL, 'D' },
-	{ "dialign-m",   required_argument, NULL, 'M' },
-	{ "dialign-p",   required_argument, NULL, 'P' },
 	{ NULL, 0, NULL, 0 }
 };
 
@@ -181,7 +190,7 @@ static void popBubble(Graph& g,
 		adj = g.adjacent_vertices(v);
 	copy(adj.first, adj.second, sorted.begin());
 	sort(sorted.begin(), sorted.end(), CompareCoverage(g));
-	if (opt::dot)
+	if (opt::bubbleGraph)
 #pragma omp critical(cout)
 	{
 		cout << '"' << get(vertex_name, g, v) << "\" -> {";
@@ -225,46 +234,6 @@ static unsigned getLength(const Graph* g, vertex_descriptor v)
 	return (*g)[v].length;
 }
 
-/** Align the specified pair of sequences.
- * @return the number of matches and size of the consensus
- */
-static pair<unsigned, unsigned> alignPair(
-		const string& seqa, const string& seqb)
-{
-	NWAlignment alignment;
-	unsigned matches = alignGlobal(seqa, seqb, alignment);
-	if (opt::verbose > 2)
-#pragma omp critical(cerr)
-		cerr << alignment;
-	return make_pair(matches, alignment.size());
-}
-
-/** Align the specified sequences.
- * @return the number of matches and size of the consensus
- */
-static pair<unsigned, unsigned> alignMulti(const vector<string>& seqs)
-{
-	string alignment;
-	unsigned matches;
-	string consensus = dialign(seqs, alignment, matches);
-	if (opt::verbose > 2)
-#pragma omp critical(cerr)
-		cerr << alignment << consensus << '\n';
-	return make_pair(matches, consensus.size());
-}
-
-/** Align the specified sequences.
- * @return the number of matches and size of the consensus
- */
-static pair<unsigned, unsigned> align(const vector<string>& seqs)
-{
-	assert(seqs.size() > 1);
-	if (seqs.size() == 2)
-		return alignPair(seqs[0], seqs[1]);
-	else
-		return alignMulti(seqs);
-}
-
 /** Align the sequences of [first,last).
  * @param t the vertex to the left of the bubble
  * @param v the vertex to the right of the bubble
@@ -278,15 +247,15 @@ static float getAlignmentIdentity(const Graph& g,
 	unsigned nbranches = distance(first, last);
 	vector<int> inDists(nbranches);
 	transform(first, last, inDists.begin(),
-			bind(getDistance, cref(g), t, _1));
+			boost::lambda::bind(getDistance, boost::cref(g), t, _1));
 	vector<int> outDists(nbranches);
 	transform(first, last, outDists.begin(),
-			bind(getDistance, cref(g), _1, v));
+			boost::lambda::bind(getDistance, boost::cref(g), _1, v));
 	vector<int> insertLens(nbranches);
 	transform(first, last, insertLens.begin(),
-			bind(getDistance, cref(g), t, _1)
-				+ bind(getLength, &g, _1)
-				+ bind(getDistance, cref(g), _1, v));
+			boost::lambda::bind(getDistance, boost::cref(g), t, _1)
+				+ boost::lambda::bind(getLength, &g, _1)
+				+ boost::lambda::bind(getDistance, boost::cref(g), _1, v));
 
 	int max_in_overlap = -(*min_element(inDists.begin(),
 			inDists.end()));
@@ -306,7 +275,7 @@ static float getAlignmentIdentity(const Graph& g,
 		return max_identity;
 
 	vector<string> seqs(nbranches);
-	transform(first, last, seqs.begin(), bind(getSequence, &g, _1));
+	transform(first, last, seqs.begin(), boost::lambda::bind(getSequence, &g, _1));
 	for (unsigned i = 0; i < seqs.size(); i++) {
 		// Remove the overlapping sequence.
 		int n = seqs[i].size();
@@ -469,7 +438,6 @@ static int longestPath(const Graph& g, const Bubble& topo)
  */
 static void scaffoldBubble(Graph& g, const Bubble& bubble)
 {
-	typedef graph_traits<Graph>::adjacency_iterator Ait;
 	typedef graph_traits<Graph>::vertex_descriptor V;
 	assert(opt::scaffold);
 	assert(bubble.size() > 2);
@@ -577,9 +545,6 @@ int main(int argc, char** argv)
 			case 'g': arg >> opt::graphPath; break;
 			case 'j': arg >> opt::threads; break;
 			case 'k': arg >> opt::k; break;
-			case 'D': arg >> opt::dialign_debug; break;
-			case 'M': arg >> opt::dialign_score; break;
-			case 'P': arg >> opt::dialign_prob; break;
 			case 'p': arg >> opt::identity; break;
 			case 'v': opt::verbose++; break;
 			case OPT_HELP:
@@ -617,13 +582,6 @@ int main(int argc, char** argv)
 		exit(EXIT_FAILURE);
 	}
 
-	init_parameters();
-	set_parameters_dna();
-	para->DEBUG = opt::dialign_debug;
-	para->SCR_MATRIX_FILE_NAME = (char*)opt::dialign_score.c_str();
-	para->DIAG_PROB_FILE_NAME = (char*)opt::dialign_prob.c_str();
-	initDialign();
-
 	const char* contigsPath(argv[optind++]);
 	string adjPath(argv[optind++]);
 
@@ -660,7 +618,7 @@ int main(int argc, char** argv)
 	if (opt::minCoverage > 0)
 		filterGraph(g);
 
-	if (opt::dot)
+	if (opt::bubbleGraph)
 		cout << "digraph bubbles {\n";
 
 	Bubbles bubbles = discoverBubbles(g);
@@ -673,15 +631,13 @@ int main(int argc, char** argv)
 	g_popped.erase(unique(g_popped.begin(), g_popped.end()),
 			g_popped.end());
 
-	if (opt::dot) {
+	if (opt::bubbleGraph) {
 		cout << "}\n";
 	} else {
 		for (vector<ContigID>::const_iterator it = g_popped.begin();
 				it != g_popped.end(); ++it)
 			cout << get(g_contigNames, *it) << '\n';
 	}
-	free_prob_dist(pdist);
-	free(para);
 
 	if (opt::verbose > 0)
 		cerr << "Bubbles: " << (g_count.bubbles + 1) / 2
@@ -705,7 +661,10 @@ int main(int argc, char** argv)
 		size_t numContigs = num_vertices(g) / 2;
 		if (opt::scaffold) {
 			Graph gorig = g;
-			assemble(g, back_inserter(paths));
+			if (opt::ss)
+				assemble_stranded(g, back_inserter(paths));
+			else
+				assemble(g, back_inserter(paths));
 			for (ContigPaths::const_iterator it = paths.begin();
 					it != paths.end(); ++it) {
 				ContigNode u(numContigs + it - paths.begin(), false);
@@ -715,7 +674,10 @@ int main(int argc, char** argv)
 					<< addDistance(gorig, *it) << '\n';
 			}
 		} else {
-			assemble(g, back_inserter(paths));
+			if (opt::ss)
+				assemble_stranded(g, back_inserter(paths));
+			else
+				assemble(g, back_inserter(paths));
 			for (ContigPaths::const_iterator it = paths.begin();
 					it != paths.end(); ++it) {
 				ContigNode u(numContigs + it - paths.begin(), false);

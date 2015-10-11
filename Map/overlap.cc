@@ -44,7 +44,7 @@ static const char VERSION_MESSAGE[] =
 PROGRAM " (" PACKAGE_NAME ") " VERSION "\n"
 "Written by Shaun Jackman.\n"
 "\n"
-"Copyright 2013 Canada's Michael Smith Genome Science Centre\n";
+"Copyright 2014 Canada's Michael Smith Genome Sciences Centre\n";
 
 static const char USAGE_MESSAGE[] =
 "Usage: " PROGRAM " [OPTION]... FILE\n"
@@ -63,6 +63,8 @@ static const char USAGE_MESSAGE[] =
 "      --adj             output the results in adj format\n"
 "      --dot             output the results in dot format [default]\n"
 "      --sam             output the results in SAM format\n"
+"      --SS                expect contigs to be oriented correctly\n"
+"      --no-SS             no assumption about contig orientation\n"
 "  -v, --verbose           display verbose output\n"
 "      --help              display this help and exit\n"
 "      --version           output version information and exit\n"
@@ -78,6 +80,9 @@ namespace opt {
 
 	/** Sample the suffix array. */
 	static unsigned sampleSA;
+
+	/** Run a strand-specific overlaping algorithm. */
+	static int ss;
 
 	/** Remove transitive edges. */
 	static int tred = true;
@@ -105,6 +110,8 @@ static const struct option longopts[] = {
 	{ "min", required_argument, NULL, 'm' },
 	{ "sample", required_argument, NULL, 's' },
 	{ "threads", required_argument, NULL, 'j' },
+	{ "SS", no_argument, &opt::ss, 1 },
+	{ "no-SS", no_argument, &opt::ss, 0 },
 	{ "tred", no_argument, &opt::tred, true },
 	{ "no-tred", no_argument, &opt::tred, false },
 	{ "verbose", no_argument, NULL, 'v' },
@@ -135,7 +142,7 @@ static void addSuffixOverlaps(Graph &g,
 		const FAIRecord& tseq = seqPos.get<0>();
 		size_t tstart = seqPos.get<1>();
 		size_t tend = tstart + fmi.qspan();
-		assert(tend < tseq.size);
+		assert(tend <= tseq.size);
 		(void)tend;
 		if (tstart > 0) {
 			// This match is due to an ambiguity code in the target sequence.
@@ -182,7 +189,7 @@ static void addPrefixOverlaps(Graph &g,
 		const FAIRecord& tseq = seqPos.get<0>();
 		size_t tstart = seqPos.get<1>();
 		size_t tend = tstart + fmi.qspan();
-		assert(tstart > 0);
+		assert(tend <= tseq.size);
 		if (tend < tseq.size) {
 			// This match is due to an ambiguity code in the target sequence.
 			continue;
@@ -215,12 +222,12 @@ static void findOverlapsSuffix(Graph &g,
 		? seq.size() - opt::maxOverlap + 1 : 1;
 	string suffix(seq, pos);
 	typedef vector<Match> Matches;
-	vector<Match> matches;
+	Matches matches;
 	fmIndex.findOverlapSuffix(suffix, back_inserter(matches),
 			opt::minOverlap);
 
 	for (Matches::reverse_iterator it = matches.rbegin();
-			it != matches.rend(); ++it)
+			!(it == matches.rend()); ++it)
 		addSuffixOverlaps(g, faIndex, fmIndex, u, *it);
 }
 
@@ -233,12 +240,12 @@ static void findOverlapsPrefix(Graph &g,
 	string prefix(seq, 0,
 			min((size_t)opt::maxOverlap, seq.size()) - 1);
 	typedef vector<Match> Matches;
-	vector<Match> matches;
+	Matches matches;
 	fmIndex.findOverlapPrefix(prefix, back_inserter(matches),
 			opt::minOverlap);
 
 	for (Matches::reverse_iterator it = matches.rbegin();
-			it != matches.rend(); ++it)
+			!(it == matches.rend()); ++it)
 		addPrefixOverlaps(g, faIndex, fmIndex, v, *it);
 }
 
@@ -251,11 +258,13 @@ static void findOverlaps(Graph& g,
 	V uc = get(vertex_complement, g, u);
 	// Add edges u+ -> v+ and v- -> u-
 	findOverlapsSuffix(g, faIndex, fmIndex, u, rec.seq);
-	string rcseq = reverseComplement(rec.seq);
-	// Add edges u- -> v+
-	findOverlapsSuffix(g, faIndex, fmIndex, uc, rcseq);
-	// Add edges v+ -> u-
-	findOverlapsPrefix(g, faIndex, fmIndex, uc, rcseq);
+	if (!opt::ss) {
+		string rcseq = reverseComplement(rec.seq);
+		// Add edges u- -> v+
+		findOverlapsSuffix(g, faIndex, fmIndex, uc, rcseq);
+		// Add edges v+ -> u-
+		findOverlapsPrefix(g, faIndex, fmIndex, uc, rcseq);
+	}
 }
 
 /** Map the sequences of the specified file. */
@@ -301,7 +310,6 @@ static void buildFMIndex(FMIndex& fm, const char* path)
 /** Read contigs and add vertices to the graph. */
 static void addVertices(const string& path, Graph& g)
 {
-	typedef vertex_property<Graph>::type VP;
 	if (opt::verbose > 0)
 		cerr << "Reading `" << path << "'...\n";
 	ifstream in(path.c_str());
@@ -346,8 +354,6 @@ static void checkIndexes(const string& path,
 
 int main(int argc, char** argv)
 {
-	checkPopcnt();
-
 	string commandLine;
 	{
 		ostringstream ss;

@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/env perl
 # Convert a FASTA file of scaffolds to a FASTA file of contigs and an
 # AGP file.
 # Written by Shaun Jackman <sjackman@bcgsc.ca>.
@@ -31,6 +31,8 @@ while (<>) {
 	my $x = 0;
 	for my $ctgseq (@ctgseqs) {
 		my $len = length $ctgseq;
+		$i++ if ($len == 0);
+		next if ($len == 0);
 		# object object_beg object_end part_number
 		print 'scaffold', $scafid, "\t",
 			$x + 1, "\t",

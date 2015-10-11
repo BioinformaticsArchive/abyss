@@ -1,6 +1,6 @@
 Title: ABySS README
 Author: Shaun Jackman, Anthony Raymond
-Affiliation: Canada's Michael Smith Genome Science Centre
+Affiliation: Canada's Michael Smith Genome Sciences Centre
 CSS: README.css
 
 ABySS
@@ -12,21 +12,28 @@ reads and large genomes.
 Contents
 ========
 
-* [Quick Start]
-	* [Install ABySS on Debian or Ubuntu]
-	* [Install ABySS on Mac OS X]
-* [Dependencies]
-* [Compiling ABySS from source]
-* [Assembling a paired-end library]
-* [Assembling multiple libraries]
-* [Scaffolding]
-* [Optimizing the parameter k]
-* [Parallel processing]
-* [Running ABySS on a cluster]
-* [Assembly Parameters]
-* [ABySS programs]
-* [Mailing List]
-* [Authors]
+* [Quick Start](#quick-start)
+	* [Install ABySS on Debian or Ubuntu](#install-abyss-on-debian-or-ubuntu)
+	* [Install ABySS on Mac OS X](#install-abyss-on-mac-os-x)
+* [Dependencies](#dependencies)
+* [Compiling ABySS from GiHub](#compiling-abyss-from-github)
+* [Compiling ABySS from source](#compiling-abyss-from-source)
+* [Assembling a paired-end library](#assembling-a-paired-end-library)
+* [Assembling multiple libraries](#assembling-multiple-libraries)
+* [Scaffolding](#scaffolding)
+* [Rescaffolding with long sequences](#rescaffolding-with-long-sequences)
+* [Assembling using a paired de Bruijn graph](#assembling-using-a-paired-de-bruijn-graph)
+* [Assembling a strand-specific RNA-Seq library](#assembling-a-strand-specific-rna-seq-library)
+* [Optimizing the parameter k](#optimizing-the-parameter-k)
+* [Parallel processing](#parallel-processing)
+* [Running ABySS on a cluster](#running-abyss-on-a-cluster)
+* [Using the DIDA alignment framework](#using-the-dida-alignment-framework)
+* [Assembly Parameters](#assembly-parameters)
+* [ABySS programs](#abyss-programs)
+* [Export to SQLite Database](#export-to-sqlite-database)
+* [Publications](#publications)
+* [Support](#support)
+* [Authors](#authors)
 
 Quick Start
 ===========
@@ -42,8 +49,9 @@ or download and install the
 
 ## Install ABySS on Mac OS X
 
-Download and install the
-[Mac OS X app](http://www.bcgsc.ca/platform/bioinfo/software/abyss).
+Install [Homebrew](http://brew.sh/), and run the commands
+
+	brew install homebrew/science/abyss
 
 ## Assemble a small synthetic data set
 
@@ -61,16 +69,31 @@ Dependencies
 
 ABySS requires the following libraries:
 
-* [Boost](http://www.boost.org)
-* [sparsehash](http://code.google.com/p/sparsehash)
+* [Boost](http://www.boost.org/)
 * [Open MPI](http://www.open-mpi.org)
+* [sparsehash](https://code.google.com/p/sparsehash/)
+* [SQLite](http://www.sqlite.org/)
 
 ABySS requires a C++ compiler that supports
 [OpenMP](http://www.openmp.org) such as [GCC](http://gcc.gnu.org).
 
 ABySS will receive an error when compiling with Boost 1.51.0 or 1.52.0
-since they contain a bug. Download an earlier version such as
-[Boost 1.50.0](http://downloads.sourceforge.net/project/boost/boost/1.50.0/boost_1_50_0.tar.bz2).
+since they contain a bug. Later versions of Boost compile without error.
+
+Compiling ABySS from GitHub
+===========================
+
+When installing ABySS from GitHub source the following tools are
+required:
+
+* [Autoconf](http://www.gnu.org/software/autoconf)
+* [Automake](http://www.gnu.org/software/automake)
+
+To generate the configure script and make files:
+
+	./autogen.sh
+
+See "Compiling ABySS from source" for further steps.
 
 Compiling ABySS from source
 ===========================
@@ -115,8 +138,14 @@ usage, although it will build without. sparsehash should be found in
 
 	./configure CPPFLAGS=-I/usr/local/include
 
+If SQLite is installed in non-default directories, its location can be
+specified to `configure`:
+
+	./configure --with-sqlite=/opt/sqlite3
+
 The default maximum k-mer size is 64 and may be decreased to reduce
-memory usage or increased at compile time:
+memory usage or increased at compile time. This value must be a
+multiple of 32 (i.e. 32, 64, 96, 128, etc):
 
 	./configure --enable-maxk=96
 
@@ -200,6 +229,59 @@ libraries and two mate-pair libraries:
 The mate-pair libraries are used only for scaffolding and do not
 contribute towards the consensus sequence.
 
+Rescaffolding with long sequences
+=================================
+
+Long sequences such as RNA-Seq contigs can be used to rescaffold an
+assembly. Sequences are aligned using BWA-MEM to the assembled
+scaffolds. Additional scaffolds are then formed between scaffolds that
+can be linked unambiguously when considering all BWA-MEM alignments.
+
+Similar to scaffolding, the names of the datasets can be specified with
+the `long` parameter. These scaffolds will be stored in the file
+`${name}-trans-scaffs.fa`. The following is an example of an assembly with PET, MPET and an RNA-Seq assembly:
+
+	abyss-pe k=64 name=ecoli lib='pe1 pe2' mp='mp1 mp2' long=long1 \
+		pe1='pe1_1.fa pe1_2.fa' pe2='pe2_1.fa pe2_2.fa' \
+		mp1='mp1_1.fa mp1_2.fa' mp2='mp2_1.fa mp2_2.fa' \
+		long1=long1.fa
+
+Assembling using a paired de Bruijn graph
+=========================================
+
+Assemblies may be performed using a _paired de Bruijn graph_ instead
+of a standard de Bruijn graph.  In paired de Bruijn graph mode, ABySS
+uses _k-mer pairs_ in place of k-mers, where each k-mer pair consists of
+two equal-size k-mers separated by a fixed distance.  A k-mer pair
+is functionally similar to a large k-mer spanning the breadth of the k-mer
+pair, but uses less memory because the sequence in the gap is not stored.
+To assemble using paired de Bruijn graph mode, specify both individual
+k-mer size (`K`) and k-mer pair span (`k`). For example, to assemble E.
+coli with a individual k-mer size of 16 and a k-mer pair span of 64:
+
+	abyss-pe name=ecoli K=16 k=64 in='reads1.fa reads2.fa'
+
+In this example, the size of the intervening gap between k-mer pairs is
+32 bp (64 - 2\*16). Note that the `k` parameter takes on a new meaning
+in paired de Bruijn graph mode. `k` indicates kmer pair span in
+paired de Bruijn graph mode (when `K` is set), whereas `k` indicates
+k-mer size in standard de Bruijn graph mode (when `K` is not set).
+
+Assembling a strand-specific RNA-Seq library
+============================================
+
+Strand-specific RNA-Seq libraries can be assembled such that the
+resulting unitigs, contigs and scaffolds are oriented correctly with
+respect to the original transcripts that were sequenced. In order to
+run ABySS in strand-specific mode, the `SS` parameter must be used as
+in the following example:
+
+	abyss-pe name=SS-RNA k=64 in='reads1.fa reads2.fa' SS=--SS
+
+The expected orientation for the read sequences with respect to the
+original RNA is RF. i.e. the first read in a read pair is always in
+reverse orientation.
+
 Optimizing the parameter k
 ==========================
 
@@ -252,19 +334,32 @@ For example, to submit an array of jobs to assemble every odd value of
 	qsub -N ecoli -pe openmpi 64 -t 51-63:2 \
 		<<<'abyss-pe -C k$SGE_TASK_ID in=/data/reads.fa'
 
+Using the DIDA alignment framework
+=================================
+
+ABySS supports the use of DIDA (Distributed Indexing Dispatched Alignment),
+an MPI-based framework for computing sequence alignments in parallel across
+multiple machines. The DIDA software must be separately downloaded and
+installed from http://www.bcgsc.ca/platform/bioinfo/software/dida. In
+comparison to the standard ABySS alignment stages which are constrained
+to a single machine, DIDA offers improved performance and the ability to
+scale to larger targets. Please see the DIDA section of the abyss-pe man
+page (in the `doc` subdirectory) for details on usage.
+
 Assembly Parameters
 ===================
 
 Parameters of the driver script, `abyss-pe`
 
  * `a`: maximum number of branches of a bubble [`2`]
- * `b`: maximum length of a bubble (bp) [`10000`]
+ * `b`: maximum length of a bubble (bp) [`""`]
  * `c`: minimum mean k-mer coverage of a unitig [`sqrt(median)`]
  * `d`: allowable error of a distance estimate (bp) [`6`]
- * `e`: minimum erosion k-mer coverage [`sqrt(median)`]
- * `E`: minimum erosion k-mer coverage per strand [`1`]
+ * `e`: minimum erosion k-mer coverage [`round(sqrt(median))`]
+ * `E`: minimum erosion k-mer coverage per strand [1 if sqrt(median) > 2 else 0]
  * `j`: number of threads [`2`]
- * `k`: size of k-mer (bp)
+ * `k`: size of k-mer (when `K` is not set) or the span of a k-mer pair (when `K` is set)
+ * `K`: the length of a single k-mer in a k-mer pair (bp)
  * `l`: minimum alignment length of a read (bp) [`k`]
  * `m`: minimum overlap of two unitigs (bp) [`30`]
  * `n`: minimum number of pairs required for building contigs [`10`]
@@ -273,12 +368,18 @@ Parameters of the driver script, `abyss-pe`
  * `q`: minimum base quality [`3`]
  * `s`: minimum unitig size required for building contigs (bp) [`200`]
  * `S`: minimum contig size required for building scaffolds (bp) [`s`]
- * `t`: minimum tip size (bp) [`2k`]
- * `v`: use `v=-v` to enable verbose logging [`disabled`]
+ * `t`: maximum length of blunt contigs to trim [`k`]
+ * `v`: use `v=-v` for verbose logging, `v=-vv` for extra verbose [`disabled`]
 
 Please see the
 [abyss-pe](http://manpages.ubuntu.com/abyss-pe.1.html)
 manual page for more information on assembly parameters.
+
+Possibly, `abyss-pe` parameters can have same names as existing environment variables'. The parameters then cannot be used until the environment variables are unset. To detect such occasions, run the command:
+
+	abyss-pe env [options]
+
+Above command will report all `abyss-pe` parameters that are set from various origins. However it will not operate ABySS programs.
 
 ABySS programs
 ==============
@@ -286,9 +387,9 @@ ABySS programs
 `abyss-pe` is a driver script implemented as a Makefile. Any option of
 `make` may be used with `abyss-pe`. Particularly useful options are:
 
- * `-C dir`, `--directory=dir`  
+ * `-C dir`, `--directory=dir`
    Change to the directory `dir` and store the results there.
- * `-n`, `--dry-run`  
+ * `-n`, `--dry-run`
    Print the commands that would be executed, but do not execute
    them.
 
@@ -316,8 +417,72 @@ ABySS programs
 For a flowchart showing the relationship between these programs,
 see doc/flowchart.pdf.
 
-Mailing List
+Export to SQLite Database
+=========================
+
+ABySS has a built-in support for SQLite database to export log values into a SQLite file and/or `.csv` files at runtime.
+
+## Database parameters
+Of `abyss-pe`:
+ * `db`: path to SQLite repository file [`$(name).sqlite`]
+ * `species`: name of species to archive [ ]
+ * `strain`: name of strain to archive [ ]
+ * `library`: name of library to archive [ ]
+
+For example, to export data of species 'Ecoli', strain 'O121' and library 'pe200' into your SQLite database repository named '/abyss/test.sqlite':
+
+	abyss-pe db=/abyss/test.sqlite species=Ecoli strain=O121 library=pe200 [other options]
+
+## Helper programs
+Found in your `path`:
+ * `abyss-db-txt`: create a flat file showing entire repository at a glance
+ * `abyss-db-csv`: create `.csv` table(s) from the repository
+
+Usage:
+
+    abyss-db-txt /your/repository
+    abyss-db-csv /your/repository program(s)
+
+For example,
+
+	abyss-db-txt repo.sqlite
+
+	abyss-db-csv repo.sqlite DistanceEst
+	abyss-db-csv repo.sqlite DistanceEst abyss-scaffold
+	abyss-db-csv repo.sqlite --all
+
+Publications
 ============
+
+## [ABySS](http://genome.cshlp.org/content/19/6/1117)
+
+Simpson, Jared T., Kim Wong, Shaun D. Jackman, Jacqueline E. Schein,
+Steven JM Jones, and İnanç Birol.
+**ABySS: a parallel assembler for short read sequence data**.
+*Genome research* 19, no. 6 (2009): 1117-1123.
+[doi:10.1101/gr.089532.108](http://dx.doi.org/10.1101/gr.089532.108)
+
+## [Trans-ABySS](http://www.nature.com/nmeth/journal/v7/n11/abs/nmeth.1517.html)
+
+Robertson, Gordon, Jacqueline Schein, Readman Chiu, Richard Corbett,
+Matthew Field, Shaun D. Jackman, Karen Mungall et al.
+**De novo assembly and analysis of RNA-seq data**.
+*Nature methods* 7, no. 11 (2010): 909-912.
+[doi:10.1038/10.1038/nmeth.1517](http://dx.doi.org/10.1038/nmeth.1517)
+
+## [ABySS-Explorer](http://ieeexplore.ieee.org/xpls/abs_all.jsp?arnumber=5290690)
+
+Nielsen, Cydney B., Shaun D. Jackman, Inanc Birol, and Steven JM Jones.
+**ABySS-Explorer: visualizing genome sequence assemblies**.
+*IEEE Transactions on Visualization and Computer Graphics*
+15, no. 6 (2009): 881-888.
+[doi:10.1109/TVCG.2009.116](http://dx.doi.org/10.1109/TVCG.2009.116)
+
+Support
+=======
+
+[Ask a question](https://www.biostars.org/p/new/post/?tag_val=abyss,assembly)
+on [Biostars](https://www.biostars.org/t/abyss/).
 
 Subscribe to the
 [ABySS mailing list]
@@ -332,10 +497,15 @@ For questions related to transcriptome assembly, contact the
 Authors
 =======
 
-This document is written by Shaun Jackman.
+- **[Shaun Jackman](http://sjackman.ca)**
+  — [GitHub/sjackman](https://github.com/sjackman)
+  — [@sjackman](https://twitter.com/sjackman)
+- **Tony Raymond** — [GitHub/traymond](https://github.com/traymond)
+- **Ben Vandervalk** — [GitHub/benvvalk ](https://github.com/benvvalk)
+- **Jared Simpson** — [GitHub/jts](https://github.com/jts)
 
-ABySS is written by Shaun Jackman, Tony Raymond and Jared Simpson.
+Supervised by [**Dr. İnanç Birol**](http://www.bcgsc.ca/faculty/inanc-birol).
 
-Copyright 2012 Canada's Michael Smith Genome Science Centre
+Copyright 2014 Canada's Michael Smith Genome Sciences Centre
 
 [![githalytics.com](https://cruel-carlota.pagodabox.com/af4811df3b40b7d096f6085db2969f0e "githalytics.com")](http://githalytics.com/sjackman/abyss)
